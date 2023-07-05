@@ -50,6 +50,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
     // send a message (or multiple) to the channel for everyone, with the voting options
     // depending on the vote, these will be different values to fill in
     // only 5 rows per message, so multiple messages might be needed
+    // 5 buttons can be per row, but that seems messy
     // modal shows the thing
     // and an ephemeral message to display your vote
     // and you can change your vote as needed?
@@ -57,6 +58,20 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
     // but will just show results in ephemeral again
 
     // I will need {user_id1:{{choice1: val, choice2: val}, eph_msg: msg}, user_id2:{choice1:val, choice2:val}, epm_msg: none} way to hold values
+
+    // display messages with vote buttons
+    //TODO
+
+    // keep listening for interactions on all the button for this vote
+    // if clicked, show a modal that:
+    //    shows previous data, if any
+    //    has an input where they can give input based on voting kind
+    // at the same time we need to listen for submitions coming from those modals
+    // make sure to only collect modal interactions associated with this vote here
+    // update the user's voting data accordingly
+    // update the vote results accordingly, if the user's data is finished
+    // and display/update the ephemeral message for the user
+    //TODO
 }
 
 struct Handler;
@@ -96,6 +111,9 @@ impl EventHandler for Handler {
             })
         }).await.unwrap();
 
+        //DEBUG
+        //println!("dm: {:?}", dm);
+
         // Collect the vote type first
         let interaction = match dm.await_component_interaction(&ctx).timeout(Duration::from_secs(60 * 3)).await {
             Some(x) => x,
@@ -104,6 +122,9 @@ impl EventHandler for Handler {
                 return;
             }
         };
+
+        //DEBUG
+        //println!("vote type int: {:?}", interaction);
 
         let votetype = VoteType::from_string(&interaction.data.values[0]);
         println!("Type choosen: {:?}", votetype);
@@ -132,8 +153,15 @@ impl EventHandler for Handler {
         let mut collector = ModalInteractionCollectorBuilder::new(&ctx)
             .collect_limit(1)
             .timeout(Duration::from_secs(60*9))
-            .filter(|i| -> bool {
-                i.data.custom_id == ID_VOTE_OPTIONS_INPUT
+            .filter(move |i| -> bool {
+                if i.data.custom_id != ID_VOTE_OPTIONS_INPUT {
+                    return false;
+                }
+                if let Some(m) = &i.message {
+                    return m.id == dm.id; // make sure it is the interaction for our DM's modal
+                } else {
+                    return false;
+                }
             })
             .build();
 
@@ -144,6 +172,9 @@ impl EventHandler for Handler {
                 return;
             }
         };
+
+        //DEBUG
+        //println!("modal submit int: {:?}", interaction);
 
         if interaction.data.components.len() < 1 {
             interaction.create_interaction_response(&ctx, |r| {
@@ -191,8 +222,8 @@ impl EventHandler for Handler {
         start_vote(&ctx, msg.channel_id, votetype, vals, DEFAULT_TIMEOUT).await;
     }
 
-    async fn ready(&self, _ctx: Context, data: Ready) {
-        println!("Client Connected: {:?}", data.user);
+    async fn ready(&self, _ctx: Context, _data: Ready) {
+        println!("Client Connected");
     }
 }
 
