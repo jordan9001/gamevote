@@ -1,4 +1,8 @@
-use std::{env, time::Duration};
+use std::{
+    env,
+    time::Duration,
+    collections::HashMap,
+};
 use serenity::{
     async_trait,
     prelude::*,
@@ -8,13 +12,15 @@ use serenity::{
         gateway::Ready,
         application::interaction::InteractionResponseType,
         application::component::InputTextStyle,
-        prelude::{prelude::component::ActionRowComponent, ChannelId},
+        application::component::ButtonStyle,
+        prelude::{prelude::component::ActionRowComponent, ChannelId, UserId, MessageId},
     },
     collector::ModalInteractionCollectorBuilder,
 };
 
 const ID_VOTE_OPTIONS_INPUT: &str = "InputOptions";
 const ID_VOTE_TYPE: &str = "VoteKind";
+const ID_VOTE_VAL_PREFIX: &str = "VoteVal";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60*60*9);
 
@@ -46,6 +52,25 @@ impl VoteType {
     }
 }
 
+enum CastVotes {
+    Select(Vec<usize>), // one or more choices, used for normal or approval voting
+    Score(Vec<(usize, f32)>), // choices associated with a value, also used for rank voting
+}
+
+struct Vote {
+    kind: VoteType,
+    uservotes: HashMap<UserId,(CastVotes, MessageId)>,
+}
+
+impl Vote {
+    fn new(vt: VoteType) -> Self {
+        Vote {
+            kind: vt,
+            uservotes: HashMap::new(),
+        }
+    }
+}
+
 async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec<&str>, timeout: Duration) {
     // send a message (or multiple) to the channel for everyone, with the voting options
     // depending on the vote, these will be different values to fill in
@@ -57,10 +82,36 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
     // final submit/view results button will not double submit your vote,
     // but will just show results in ephemeral again
 
-    // I will need {user_id1:{{choice1: val, choice2: val}, eph_msg: msg}, user_id2:{choice1:val, choice2:val}, epm_msg: none} way to hold values
+    let mut i = 0;
+    let num_msg = ((vals.len() -1) / 5) + 1;
+    let vlen = vals.len();
+    while i < vlen {
+        cid.send_message(ctx, |m| {
+            m
+                .content(format!("{} Vote {}/{}", votetype.to_string(), (i.saturating_sub(1)/5) + 1, num_msg))
+                    // TODO, maybe no content except on the first one?
+                .components(|mut c| {
+                    for j in 0..5 {
+                        let vali = i + j;
+                        if vali >= vlen {
+                            break;
+                        }
+                        c = c.create_action_row(|r| {
+                            r.create_button(|btn| {
+                                btn.custom_id(format!("{}{}", ID_VOTE_VAL_PREFIX, vali))
+                                    .style(ButtonStyle::Secondary)
+                                    .label(vals[vali])
+                            })
+                        });
+                    }
+                    c
+                })
+        }).await.unwrap();
+        i += 5;
+    }
 
     // display messages with vote buttons
-    //TODO
+    let vote = Vote::new(votetype);
 
     // keep listening for interactions on all the button for this vote
     // if clicked, show a modal that:
@@ -71,6 +122,8 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
     // update the user's voting data accordingly
     // update the vote results accordingly, if the user's data is finished
     // and display/update the ephemeral message for the user
+    // use interaction.create_followup_message / edit_followup_message? 
+    // (Will edit work if a ephemeral msg times out?)
     //TODO
 }
 
@@ -164,6 +217,10 @@ impl EventHandler for Handler {
                 }
             })
             .build();
+
+        // TODO this is all a bit brittle
+        // we need to handle the case where we click away, then want to get the modal back
+        // or at least update the message to say, "Cancled"
 
         let interaction = match collector.next().await {
             Some(x) => x,
