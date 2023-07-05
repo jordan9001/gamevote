@@ -1,4 +1,4 @@
-use std::{env, time::Duration, vec, collections::btree_map::Values};
+use std::{env, time::Duration};
 use serenity::{
     async_trait,
     prelude::*,
@@ -8,13 +8,15 @@ use serenity::{
         gateway::Ready,
         application::interaction::InteractionResponseType,
         application::component::InputTextStyle,
-        prelude::prelude::component::ActionRowComponent,
+        prelude::{prelude::component::ActionRowComponent, ChannelId},
     },
     collector::ModalInteractionCollectorBuilder,
 };
 
 const ID_VOTE_OPTIONS_INPUT: &str = "InputOptions";
 const ID_VOTE_TYPE: &str = "VoteKind";
+
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60*60*9);
 
 #[derive(PartialEq, Eq, Debug)]
 struct VoteType(u32);
@@ -42,6 +44,18 @@ impl VoteType {
             _ => VoteType(0),
         }
     }
+}
+
+async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec<&str>, timeout: Duration) {
+    // send a message (or multiple) to the channel for everyone, with the voting options
+    // depending on the vote, these will be different values to fill in
+    // I think there will have to be a modal for voting
+    // and an ephemeral message to display your vote
+    // and you can change your vote as needed?
+    // final submit/view results button will not double submit your vote,
+    // but will just show results in ephemeral if you have submitted
+
+    // I will need {user_id1:{choice1: val, choice2: val}, user_id2:{choice1:val, choice2:val}}
 }
 
 struct Handler;
@@ -90,8 +104,8 @@ impl EventHandler for Handler {
             }
         };
 
-        let typestr = VoteType::from_string(&interaction.data.values[0]);
-        println!("Type choosen: {:?}", typestr);
+        let votetype = VoteType::from_string(&interaction.data.values[0]);
+        println!("Type choosen: {:?}", votetype);
 
         interaction.create_interaction_response(&ctx, |r| {
             r.kind(InteractionResponseType::Modal).interaction_response_data(|d| {
@@ -172,12 +186,8 @@ impl EventHandler for Handler {
             })
         }).await.unwrap();
 
-        //TODO
         // now from the interaction above we can create the vote for everyone in the channel
-        //msg.channel_id.send_message(&ctx, |m| {
-        //    // create the vote message
-        //    create_vote_message(m, vec![], 0);
-        //}).await.unwrap();
+        start_vote(&ctx, msg.channel_id, votetype, vals, DEFAULT_TIMEOUT).await;
     }
 
     async fn ready(&self, _ctx: Context, data: Ready) {
