@@ -49,13 +49,14 @@ impl VoteType {
 async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec<&str>, timeout: Duration) {
     // send a message (or multiple) to the channel for everyone, with the voting options
     // depending on the vote, these will be different values to fill in
-    // I think there will have to be a modal for voting
+    // only 5 rows per message, so multiple messages might be needed
+    // modal shows the thing
     // and an ephemeral message to display your vote
     // and you can change your vote as needed?
     // final submit/view results button will not double submit your vote,
-    // but will just show results in ephemeral if you have submitted
+    // but will just show results in ephemeral again
 
-    // I will need {user_id1:{choice1: val, choice2: val}, user_id2:{choice1:val, choice2:val}}
+    // I will need {user_id1:{{choice1: val, choice2: val}, eph_msg: msg}, user_id2:{choice1:val, choice2:val}, epm_msg: none} way to hold values
 }
 
 struct Handler;
