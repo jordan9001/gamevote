@@ -2,6 +2,7 @@ use std::{
     env,
     time::Duration,
     collections::HashMap,
+    sync::{RwLock, Arc},
 };
 use serenity::{
     async_trait,
@@ -74,20 +75,19 @@ impl CastVotes {
 
 struct UserVote {
     votes: CastVotes,
-    fullvote: bool,
     votemsg: MessageId,
     page: usize,
 }
 
 struct Vote {
-    kind: VoteType,
+    _kind: VoteType,
     uservotes: HashMap<UserId,UserVote>,
 }
 
 impl Vote {
     fn new(vt: VoteType) -> Self {
         Vote {
-            kind: vt,
+            _kind: vt,
             uservotes: HashMap::new(),
         }
     }
@@ -111,18 +111,32 @@ macro_rules! setup_base_message {
     };
 }
 
-fn create_user_message<'a, 'b, 'c>(mut c: &'b mut CreateComponents, vals: &'c Vec<&'a str>, page: usize, vote: &'c Vote) -> &'b mut CreateComponents {
+fn create_user_message<'a, 'b, 'c>(mut c: &'b mut CreateComponents, vals: &'c Vec<&'a str>, page: usize, vote: &'c Vote, uid: UserId) -> &'b mut CreateComponents {
     let i = page * 4;
     for j in 0..4 {
         let vali = i + j;
         if vali >= vals.len() {
             break;
         }
+        let item_note = if let Some(uv) = vote.uservotes.get(&uid) {
+                match &uv.votes {
+                CastVotes::Select(v) => {
+                    if v.contains(&vali) {" ✅"} else {""}
+                },
+                CastVotes::Score(_m) => {
+                    //TODO
+                    ""
+                }
+            }
+        } else {
+            ""
+        };
+
         c = c.create_action_row(|r| {
             r.create_button(|btn| {
                 btn.custom_id(format!("{}{}", ID_VOTE_VAL_PREFIX, vali))
                     .style(ButtonStyle::Secondary)
-                    .label(vals[vali]) // TODO adjust label accoring to vote
+                    .label(format!("{}{}", vals[vali], item_note))
             })
         });
     }
@@ -142,13 +156,13 @@ fn create_user_message<'a, 'b, 'c>(mut c: &'b mut CreateComponents, vals: &'c Ve
             .create_button(|btn| {
                 btn.custom_id(ID_VOTE_SUBMIT)
                     .style(ButtonStyle::Primary)
-                    .label("Submit")
+                    .label("Submit") // TODO change to "Show results" if submitted
             })
     })
 }
 
 async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec<&str>, timeout: Duration) {
-    let mut vote = Vote::new(votetype);
+    let vote = Arc::new(RwLock::new(Vote::new(votetype)));
     let num_pages = ((vals.len() -1) / 5) + 1;
 
     // actually let's try just having a "vote" button, so we can edit the ephemeral button to match each user
@@ -170,16 +184,24 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
     //TODO
     
     // collector for the left, right, submit buttons
+    let nav_vote = vote.clone();
     let mut nav_col = ComponentInteractionCollectorBuilder::new(ctx)
         .timeout(timeout)
         .channel_id(cid)
-        .filter(|i| {
-            //DEBUG
+        .filter(move |i| {
             // filter by our ephemeral message ids? or instead mark our components with a voteid?
-            //TODO
-            // filter by component ids for these buttons
-            //TODO
-            false
+            let mid = i.message.id;
+            let uid = i.user.id;
+
+            {
+                let rvote = nav_vote.read().unwrap();
+                if let Some(uv) = rvote.uservotes.get(&uid) {
+                    if mid == uv.votemsg {
+                        return true;
+                    }
+                }
+                false
+            }
         })
         .build();
 
@@ -193,8 +215,13 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
                 let mut page = 0;
                 let uid = interaction.user.id;
                 // lookup user
-                if let Some(uv) = vote.uservotes.get(&uid) {
-                    page = uv.page;
+
+                {
+                    let rvote = vote.read().unwrap();
+
+                    if let Some(uv) = rvote.uservotes.get(&uid) {
+                        page = uv.page;
+                    }
                 }
 
                 // this button brings up a new ephemeral message for voting
@@ -203,7 +230,8 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
                         d
                             .content(format!("Page {}/{}", page+1, num_pages))
                             .components(|c| {
-                                create_user_message(c, &vals, page, &vote)
+                                let rvote = vote.read().unwrap();
+                                create_user_message(c, &vals, page, &rvote, uid)
                             })
                             .ephemeral(true)
                     })
@@ -212,24 +240,127 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
                 // get the response info
                 let respmsg = interaction.get_interaction_response(ctx).await.unwrap();
 
-                if let Some(uv) = vote.uservotes.get_mut(&uid) {
-                    // delete any old ephemeral message
-                    //TODO
-                    // set the message id from the new ephemeral message
-                    uv.votemsg = respmsg.id
-                } else {
-                    // create uservote entry and record the ephemeral message id
-                    vote.uservotes.insert(uid, UserVote{
-                        votes: CastVotes::new(votetype),
-                        fullvote: false,
-                        votemsg: respmsg.id,
-                        page: 0,
-                    });
+                {
+                    let mut wvote = vote.write().unwrap();
+
+                    if let Some(uv) = wvote.uservotes.get_mut(&uid) {
+                        // delete any old ephemeral message
+                        //TODO
+                        // set the message id from the new ephemeral message
+                        uv.votemsg = respmsg.id
+                    } else {
+                        // create uservote entry and record the ephemeral message id
+                        wvote.uservotes.insert(uid, UserVote{
+                            votes: CastVotes::new(votetype),
+                            votemsg: respmsg.id,
+                            page: 0,
+                        });
+                    }
                 }
             },
             Some(interaction) = nav_col.next() => {
                 println!("Got nav interaction");
-                //TODO
+                let uid = interaction.user.id;
+                let mut page = 0;
+                let mut gotpage = false;
+                let mut refresh_msg = true;
+
+                match &interaction.data.custom_id[..] {
+                    lr @ (ID_VOTE_LEFT | ID_VOTE_RIGHT) => {
+                        let dir = lr == ID_VOTE_LEFT;
+                        {
+                            let mut wvote = vote.write().unwrap();
+
+                            if let Some(uv) = wvote.uservotes.get_mut(&uid) {
+                                // edit their message to the next page to the left
+                                page = uv.page;
+                                if dir {
+                                    page += 1;
+                                    if page >= num_pages {
+                                        page = 0;
+                                    }
+                                } else {
+                                    if page == 0 {
+                                        page = num_pages - 1;
+                                    } else {
+                                        page -= 1;
+                                    }
+                                }
+
+                                uv.page = page;
+
+                            } else {
+                                panic!("Somehow got a nav interaction without an entry in the vote map?")
+                            }
+                        }
+
+                        gotpage = true;
+                    },
+                    ID_VOTE_SUBMIT => {
+                        // submit the vote for this user, if we can
+                        //TODO
+                        // show them the vote results as well in a new ephemeral
+                        //TODO
+                        refresh_msg = false;
+                    },
+                    value_id => {
+                        // find which value the vote is for
+                        if !value_id.starts_with(ID_VOTE_VAL_PREFIX) {
+                            panic!("Unknown component value from voting message {}", value_id);
+                        }
+
+                        let num = value_id[ID_VOTE_VAL_PREFIX.len()..].parse::<usize>().unwrap();
+
+                        println!("Vote for value {} ({})", num, vals[num]);
+
+                        {
+                            let mut wvote = vote.write().unwrap();
+
+                            if let Some(uv) = wvote.uservotes.get_mut(&uid) {
+                                // depending on the vote type, pop a modal to ask for more info
+                                // otherwise just toggle this one in the vote list
+                                match &mut uv.votes {
+                                    CastVotes::Select(v) => {
+                                        if v.contains(&num) {
+                                            v.retain(|&x| x != num);
+                                        } else {
+                                            v.push(num);
+                                        }
+                                    },
+                                    CastVotes::Score(_m) => {
+                                        //TODO
+                                    },
+                                }
+                            } else {
+                                panic!("Somehow got a vote interaction without an entry in the vote map?")
+                            }
+                        }
+
+                    },
+                }
+
+                if refresh_msg {
+                    // update the message after that interaction
+                    if !gotpage {
+                        let rvote = vote.read().unwrap();
+                        if let Some(uv) = rvote.uservotes.get(&uid) {
+                            page = uv.page;
+                        }
+                    }
+                    // edit the modal
+                    interaction.create_interaction_response(ctx, |resp| {
+                        resp.kind(InteractionResponseType::UpdateMessage).interaction_response_data(|d| {
+                            d
+                                .content(format!("Page {}/{}", page+1, num_pages))
+                                .components(|c| {
+                                    let rvote = vote.read().unwrap();
+                                    create_user_message(c, &vals, page, &rvote, uid)
+                                })
+                                .ephemeral(true)
+                        })
+                    }).await.unwrap();
+                }
+
             },
             else => {
                 println!("Ending collection for vote! Timed out?");
