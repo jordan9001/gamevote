@@ -18,6 +18,11 @@ use serenity::{
     },
     collector::{ModalInteractionCollectorBuilder, ComponentInteractionCollectorBuilder}, builder::CreateComponents,
 };
+use tallystick::{
+    approval::DefaultApprovalTally,
+    borda::DefaultBordaTally,
+    score::ScoreTally,
+};
 
 const ID_VOTE_OPTIONS_INPUT: &str = "InputOptions";
 const ID_VOTE_TYPE: &str = "VoteKind";
@@ -30,6 +35,7 @@ const ID_VOTE_RIGHT: &str = "VoteRight";
 const ID_VOTE_SUBMIT: &str = "VoteSubmit";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60*60*9);
+const PERPAGE: usize = 4;
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 struct VoteType(u32);
@@ -91,25 +97,177 @@ impl CastVotes {
             _ => panic!("Tried to create CastVotes with unknown vote type"),
         }
     }
+
+    fn get_vote_vec(&self) -> Vec<usize> {
+        // if this is a score, then order them from lowest to highest
+        // otherwise just return the vec
+        match self {
+            CastVotes::Select(v) => {
+                v.to_vec()
+            },
+            CastVotes::Score(m) => {
+                let mut vt: Vec<(usize, f32)> = Vec::new();
+                for (u, f) in m {
+                    vt.push((*u,*f));
+                }
+                vt.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                vt.iter().map(|x| x.0).collect()
+            }
+        }
+    }
+
+    fn get_vote_weight_vec(&self) -> Vec<(usize, f32)> {
+        // if this is a select, then something went wrong
+        match self {
+            CastVotes::Select(_) => {
+                panic!("Tried to get weighted vec but have a select");
+            },
+            CastVotes::Score(m) => {
+                let mut v: Vec<(usize, f32)> = Vec::new();
+                for (u, f) in m {
+                    v.push((*u,*f));
+                }
+                v
+            }
+        }
+    }
+
+    fn are_valid(&self, vt: VoteType, size: usize) -> bool {
+        match vt {
+            VOTE_APPROVAL => true,
+            VOTE_SCORE => true,
+            VOTE_BORDA => {
+                // check every key is in there
+                // check each key has a non-zero rating
+                // not too worried about tie ratings, just let the sorting sort it
+                match self {
+                    CastVotes::Select(_) => {
+                        panic!("Borda vote with select backing");
+                    },
+                    CastVotes::Score(m) => {
+                        for i in 0..size {
+                            if let Some(v) = m.get(&i) {
+                                if *v < 1.0 {
+                                    return false;
+                                }
+                            } else {
+                                return false;
+                            }
+
+                        }
+                    },
+                }
+                true
+            },
+            _ => panic!("Tried to check votes with unknown vote type"),
+        }
+    }
+
+    fn get_ballot(&self, size: usize) -> Self {
+        match self {
+            CastVotes::Select(v) => {
+                let newv = v.to_vec();
+                CastVotes::Select(newv)
+            },
+            CastVotes::Score(m) => {
+                let mut newm = m.clone();
+                // add in defaults
+                for i in 0..size {
+                    if !newm.contains_key(&i) {
+                        newm.insert(i, 0.0);
+                    }
+                }
+                CastVotes::Score(newm)
+            },
+        }
+    }
 }
 
 struct UserVote {
     votes: CastVotes,
     votemsg: MessageId,
     page: usize,
-    submitted: bool,
 }
 
 struct Vote {
-    _kind: VoteType,
+    kind: VoteType,
     uservotes: HashMap<UserId,UserVote>,
+    submittedvotes: HashMap<UserId,CastVotes>,
 }
 
 impl Vote {
     fn new(vt: VoteType) -> Self {
         Vote {
-            _kind: vt,
+            kind: vt,
             uservotes: HashMap::new(),
+            submittedvotes: HashMap::new(),
+        }
+    }
+
+    fn get_results(&self, vals: &Vec<&str>) -> String {
+        match self.kind {
+            VOTE_APPROVAL => {
+                // TODO macro this copy paste stuff
+                let mut tally = DefaultApprovalTally::new(1);
+
+                for (_, cv) in &self.submittedvotes {
+                    tally.add(cv.get_vote_vec());
+                }
+
+                let mut result: String = String::from("Approval Vote Results (so far):\nWinner:\n");
+                let winners = tally.winners().all();
+                for w in winners {
+                    result.push_str(&format!("{}\n", vals[w]));
+                }
+
+                result.push_str("\nTotals:\n");
+                for (w, c) in tally.totals() {
+                    result.push_str(&format!("{}: {}\n", c, vals[w]));
+                }
+
+                result
+            },
+            VOTE_SCORE => {
+                let mut tally = ScoreTally::<usize, f32>::new(1);
+
+                for (_, cv) in &self.submittedvotes {
+                    tally.add(cv.get_vote_weight_vec());
+                }
+
+                let mut result: String = String::from("Score Vote Results (so far):\nWinner:\n");
+                let winners = tally.winners().all();
+                for w in winners {
+                    result.push_str(&format!("{}\n", vals[w]));
+                }
+
+                result.push_str("\nTotals:\n");
+                for (w, c) in tally.totals() {
+                    result.push_str(&format!("{}: {}\n", c, vals[w]));
+                }
+
+                result
+            },
+            VOTE_BORDA => {
+                let mut tally = DefaultBordaTally::new(1, tallystick::borda::Variant::Borda);
+
+                for (_, cv) in &self.submittedvotes {
+                    tally.add(cv.get_vote_vec()).unwrap();
+                }
+
+                let mut result: String = String::from("Borda Vote Results (so far):\nWinner:\n");
+                let winners = tally.winners().all();
+                for w in winners {
+                    result.push_str(&format!("{}\n", vals[w]));
+                }
+
+                result.push_str("\nTotals:\n");
+                for (w, c) in tally.totals() {
+                    result.push_str(&format!("{}: {}\n", c, vals[w]));
+                }
+
+                result
+            },
+            _ => panic!("Tried to get results with unknown vote type"),
         }
     }
 }
@@ -133,8 +291,8 @@ macro_rules! setup_base_message {
 }
 
 fn create_user_message<'a, 'b, 'c>(mut c: &'b mut CreateComponents, vals: &'c Vec<&'a str>, page: usize, vote: &'c Vote, uid: UserId) -> &'b mut CreateComponents {
-    let i = page * 4;
-    for j in 0..4 {
+    let i = page * PERPAGE;
+    for j in 0..PERPAGE {
         let vali = i + j;
         if vali >= vals.len() {
             break;
@@ -150,7 +308,7 @@ fn create_user_message<'a, 'b, 'c>(mut c: &'b mut CreateComponents, vals: &'c Ve
                     } else {
                         0.0
                     };
-                    format!(" {}", s)
+                    format!(": {}", s)
                 }
             }
         } else {
@@ -186,9 +344,43 @@ fn create_user_message<'a, 'b, 'c>(mut c: &'b mut CreateComponents, vals: &'c Ve
     })
 }
 
+// a macro because the different interaction types
+macro_rules! user_vote_message {
+    ($interaction:expr, $uid:expr, $extra:expr, $vote:expr, $ctx:expr, $num_pages:expr, $vals:expr, $first:expr) => {
+        // edit or create the ephemeral
+        let irkind: InteractionResponseType = if $first {
+            InteractionResponseType::ChannelMessageWithSource
+        } else {
+            InteractionResponseType::UpdateMessage
+        };
+
+        let disppage = {
+            let rvote = $vote.read().unwrap();
+
+            if let Some(uv) = rvote.uservotes.get(&$uid) {
+                uv.page
+            } else {
+                panic!("Tried to get user page for user not in vote structure yet");
+            }
+        };
+
+        $interaction.create_interaction_response($ctx, |resp| {
+            resp.kind(irkind).interaction_response_data(|d| {
+                d
+                    .content(format!("Page {}/{}{}", disppage+1, $num_pages, $extra))
+                    .components(|c| {
+                        let rvote = $vote.read().unwrap();
+                        create_user_message(c, &$vals, disppage, &rvote, $uid)
+                    })
+                    .ephemeral(true)
+            })
+        }).await.unwrap();
+    };
+}
+
 async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec<&str>, timeout: Duration) {
     let vote = Arc::new(RwLock::new(Vote::new(votetype)));
-    let num_pages = ((vals.len() -1) / 5) + 1;
+    let num_pages = ((vals.len() -1) / PERPAGE) + 1;
 
     // actually let's try just having a "vote" button, so we can edit the ephemeral button to match each user
     let basemsg = cid.send_message(ctx, |m| {
@@ -253,30 +445,25 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
         tokio::select! {
             Some(interaction) = mainbtn_col.next() => {
                 println!("Got main btn interaction");
-                let mut page = 0;
+                
                 let uid = interaction.user.id;
-                // lookup user
+
+                // lookup / init user
 
                 {
-                    let rvote = vote.read().unwrap();
+                    let mut wvote = vote.write().unwrap();
 
-                    if let Some(uv) = rvote.uservotes.get(&uid) {
-                        page = uv.page;
+                    if !wvote.uservotes.contains_key(&uid) {
+                        wvote.uservotes.insert(uid, UserVote{
+                            votes: CastVotes::new(votetype),
+                            votemsg: MessageId(0),
+                            page: 0,
+                        });
                     }
                 }
 
                 // this button brings up a new ephemeral message for voting
-                interaction.create_interaction_response(ctx, |resp| {
-                    resp.kind(InteractionResponseType::ChannelMessageWithSource).interaction_response_data(|d| {
-                        d
-                            .content(format!("Page {}/{}", page+1, num_pages))
-                            .components(|c| {
-                                let rvote = vote.read().unwrap();
-                                create_user_message(c, &vals, page, &rvote, uid)
-                            })
-                            .ephemeral(true)
-                    })
-                }).await.unwrap();
+                user_vote_message!(interaction, uid, "", vote, ctx, num_pages, vals, true);
 
                 // get the response info
                 let respmsg = interaction.get_interaction_response(ctx).await.unwrap();
@@ -289,22 +476,13 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
                         // set the message id from the new ephemeral message
                         uv.votemsg = respmsg.id
                     } else {
-                        // create uservote entry and record the ephemeral message id
-                        wvote.uservotes.insert(uid, UserVote{
-                            votes: CastVotes::new(votetype),
-                            votemsg: respmsg.id,
-                            page: 0,
-                            submitted: false,
-                        });
+                        panic!("Tried to set initial ephemeral message, but didn't have a entry for the user");
                     }
                 }
             },
             Some(interaction) = nav_col.next() => {
                 println!("Got vote msg interaction");
                 let uid = interaction.user.id;
-                let mut page = 0;
-                let mut gotpage = false;
-                let mut refresh_msg = true;
 
                 match &interaction.data.custom_id[..] {
                     lr @ (ID_VOTE_LEFT | ID_VOTE_RIGHT) => {
@@ -314,7 +492,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
 
                             if let Some(uv) = wvote.uservotes.get_mut(&uid) {
                                 // edit their message to the next page to the left
-                                page = uv.page;
+                                let mut page = uv.page;
                                 if dir {
                                     page += 1;
                                     if page >= num_pages {
@@ -334,15 +512,66 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
                                 panic!("Somehow got a nav interaction without an entry in the vote map?")
                             }
                         }
-
-                        gotpage = true;
+                        user_vote_message!(interaction, uid, "", vote, ctx, num_pages, vals, false);
                     },
                     ID_VOTE_SUBMIT => {
                         // submit the vote for this user, if we can
-                        //TODO
-                        // show them the vote results as well, and update everyone else's votes
-                        //TODO
-                        refresh_msg = false;
+                        // first check that it is a valid submission, and let them know if it is not
+                        let valid_submission;
+
+
+                        let mut isfirst = false;
+                        let mut subcount = 0;
+                        {
+                            let mut wvote = vote.write().unwrap();
+
+                            if let Some(uv) = wvote.uservotes.get_mut(&uid) {
+                                valid_submission = uv.votes.are_valid(votetype, vals.len());
+
+                                if valid_submission {
+                                    let ballot = uv.votes.get_ballot(vals.len());
+                                    if wvote.submittedvotes.insert(uid, ballot).is_none() {
+                                        subcount = wvote.submittedvotes.len();
+                                        isfirst = true;
+                                    }
+                                }
+                            } else {
+                                panic!("No user but got submit");
+                            }
+                        }
+
+                        if !valid_submission {
+                            // return an error to the user
+                            let errresp = format!("\nError: invalid values for a {} vote, please fix your vote", votetype.to_string());
+                            user_vote_message!(interaction, uid, errresp, vote, ctx, num_pages, vals, false);
+                        } else {
+                            // update the count
+                            if isfirst {
+                                cid.edit_message(ctx, basemsg.id, |e| {
+                                    setup_base_message!(e, subcount, votetype.to_string())
+                                }).await.unwrap();
+                            }
+
+                            // calculate the vote result
+                            let resultsmsg;
+                            {
+                                let rvote = vote.read().unwrap();
+
+                                resultsmsg = rvote.get_results(&vals);
+                            }
+
+                            // show them the vote results message
+                            // it would be cool to update everyone's messages
+                            // but we can't do that to an ephemeral message without an interaction to respond to
+
+                            interaction.create_interaction_response(ctx, |resp| {
+                                resp.kind(InteractionResponseType::ChannelMessageWithSource).interaction_response_data(|d| {
+                                    d
+                                        .content(resultsmsg)
+                                        .ephemeral(true)
+                                })
+                            }).await.unwrap();
+                        }
                     },
                     value_id => {
                         // find which value the vote is for
@@ -352,6 +581,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
 
                         let num = value_id[ID_VOTE_VAL_PREFIX.len()..].parse::<usize>().unwrap();
                         let mut current_score: f32 = 0.0;
+                        let mut refresh_msg = true;
 
                         println!("Vote for value {} ({})", num, vals[num]);
 
@@ -405,39 +635,16 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
                                         })
                                 })
                             }).await.unwrap();
+                        } else {
+                            user_vote_message!(interaction, uid, "", vote, ctx, num_pages, vals, false);
                         }
-
                     },
                 }
-
-                if refresh_msg {
-                    // update the message after that interaction
-                    if !gotpage {
-                        let rvote = vote.read().unwrap();
-                        if let Some(uv) = rvote.uservotes.get(&uid) {
-                            page = uv.page;
-                        }
-                    }
-                    // edit the ephemeral
-                    interaction.create_interaction_response(ctx, |resp| {
-                        resp.kind(InteractionResponseType::UpdateMessage).interaction_response_data(|d| {
-                            d
-                                .content(format!("Page {}/{}", page+1, num_pages))
-                                .components(|c| {
-                                    let rvote = vote.read().unwrap();
-                                    create_user_message(c, &vals, page, &rvote, uid)
-                                })
-                                .ephemeral(true)
-                        })
-                    }).await.unwrap();
-                }
-
             },
             Some(interaction) = mod_col.next() => {
                 println!("Got Modal Vote Interaction");
                 if let ActionRowComponent::InputText(it) = &interaction.data.components[0].components[0] {
                     let uid = interaction.user.id;
-                    let page;
 
                     // parse custom id to get vote index
                     if !it.custom_id.starts_with(ID_VOTE_VAL_INPUT_PREFIX) {
@@ -463,19 +670,18 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
                         },
                     };
 
-                    if badvalue {
+                    let errresp = if badvalue {
                         //TODO display an error or something?
-                        println!("Silently changing bad value {:?} to 0.0", it.value);
-                    }
-
-                    println!("Vote for {} = {}", it.custom_id, it.value);
+                        println!("Changing bad value {:?} to 0.0", it.value);
+                        format!("\nError: Bad Value")
+                    } else {
+                        String::from("")
+                    };
 
                     {
                         let mut wvote = vote.write().unwrap();
 
                         if let Some(uv) = wvote.uservotes.get_mut(&uid) {
-                            page = uv.page;
-
                             match &mut uv.votes {
                                 CastVotes::Select(_v) => {
                                     panic!("Got modal response for a select vote?");
@@ -490,17 +696,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
                     }
 
                     // edit the ephemeral
-                    interaction.create_interaction_response(ctx, |resp| {
-                        resp.kind(InteractionResponseType::UpdateMessage).interaction_response_data(|d| {
-                            d
-                                .content(format!("Page {}/{}", page+1, num_pages))
-                                .components(|c| {
-                                    let rvote = vote.read().unwrap();
-                                    create_user_message(c, &vals, page, &rvote, uid)
-                                })
-                                .ephemeral(true)
-                        })
-                    }).await.unwrap();
+                    user_vote_message!(interaction, uid, errresp, vote, ctx, num_pages, vals, false);
                 } else {
                     panic!("Modal response didn't have input text?");
                 }
