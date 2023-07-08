@@ -195,6 +195,25 @@ struct Vote {
     submittedvotes: HashMap<UserId,CastVotes>,
 }
 
+
+macro_rules! tally_str {
+    ($tally:expr, $vals:expr, $votetype:expr, $num_voters:expr) => {
+    {
+        let mut result: String = format!("{} Vote Results (so far: {} voters):\nWinner:\n", $votetype.to_string(), $num_voters);
+        let winners = $tally.winners().all();
+        for w in winners {
+            result.push_str(&format!("{}\n", $vals[w]));
+        }
+        result.push_str("\nTotals:\n");
+        for (w, c) in $tally.totals() {
+            result.push_str(&format!("{}: {}\n", c, $vals[w]));
+        }
+        result.push_str("\n Submit again to refresh your results");
+        result
+    }
+    };
+}
+
 impl Vote {
     fn new(vt: VoteType) -> Self {
         Vote {
@@ -205,6 +224,7 @@ impl Vote {
     }
 
     fn get_results(&self, vals: &Vec<&str>) -> String {
+        let mut num_voters = 0;
         match self.kind {
             VOTE_APPROVAL => {
                 // TODO macro this copy paste stuff
@@ -212,60 +232,30 @@ impl Vote {
 
                 for (_, cv) in &self.submittedvotes {
                     tally.add(cv.get_vote_vec());
+                    num_voters += 1;
                 }
 
-                let mut result: String = String::from("Approval Vote Results (so far):\nWinner:\n");
-                let winners = tally.winners().all();
-                for w in winners {
-                    result.push_str(&format!("{}\n", vals[w]));
-                }
-
-                result.push_str("\nTotals:\n");
-                for (w, c) in tally.totals() {
-                    result.push_str(&format!("{}: {}\n", c, vals[w]));
-                }
-
-                result
+                tally_str!(tally, vals, self.kind, num_voters)
             },
             VOTE_SCORE => {
                 let mut tally = ScoreTally::<usize, f32>::new(1);
 
                 for (_, cv) in &self.submittedvotes {
                     tally.add(cv.get_vote_weight_vec());
+                    num_voters += 1;
                 }
 
-                let mut result: String = String::from("Score Vote Results (so far):\nWinner:\n");
-                let winners = tally.winners().all();
-                for w in winners {
-                    result.push_str(&format!("{}\n", vals[w]));
-                }
-
-                result.push_str("\nTotals:\n");
-                for (w, c) in tally.totals() {
-                    result.push_str(&format!("{}: {}\n", c, vals[w]));
-                }
-
-                result
+                tally_str!(tally, vals, self.kind, num_voters)
             },
             VOTE_BORDA => {
                 let mut tally = DefaultBordaTally::new(1, tallystick::borda::Variant::Borda);
 
                 for (_, cv) in &self.submittedvotes {
                     tally.add(cv.get_vote_vec()).unwrap();
+                    num_voters += 1;
                 }
 
-                let mut result: String = String::from("Borda Vote Results (so far):\nWinner:\n");
-                let winners = tally.winners().all();
-                for w in winners {
-                    result.push_str(&format!("{}\n", vals[w]));
-                }
-
-                result.push_str("\nTotals:\n");
-                for (w, c) in tally.totals() {
-                    result.push_str(&format!("{}: {}\n", c, vals[w]));
-                }
-
-                result
+                tally_str!(tally, vals, self.kind, num_voters)
             },
             _ => panic!("Tried to get results with unknown vote type"),
         }
@@ -444,7 +434,6 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
     loop {
         tokio::select! {
             Some(interaction) = mainbtn_col.next() => {
-                println!("Got main btn interaction");
                 
                 let uid = interaction.user.id;
 
@@ -481,7 +470,6 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
                 }
             },
             Some(interaction) = nav_col.next() => {
-                println!("Got vote msg interaction");
                 let uid = interaction.user.id;
 
                 match &interaction.data.custom_id[..] {
