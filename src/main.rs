@@ -314,9 +314,9 @@ fn create_user_message<'a, 'b, 'c>(mut c: &'b mut CreateComponents, vals: &'c Ve
         });
     }
     // add a row for the movement and submit buttons
-    let donav = vals.len() > PERPAGE && page == 0;
+    let nonav = vals.len() <= PERPAGE && page == 0;
     c.create_action_row(|mut r| {
-        if donav {
+        if !nonav {
             r = r
                 .create_button(|btn| {
                     btn.custom_id(ID_VOTE_LEFT)
