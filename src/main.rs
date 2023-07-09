@@ -16,7 +16,8 @@ use serenity::{
         application::component::ButtonStyle,
         prelude::{prelude::component::ActionRowComponent, ChannelId, UserId, MessageId},
     },
-    collector::{ModalInteractionCollectorBuilder, ComponentInteractionCollectorBuilder}, builder::CreateComponents,
+    collector::{ModalInteractionCollectorBuilder, ComponentInteractionCollectorBuilder},
+    builder::CreateComponents,
 };
 use tallystick::{
     approval::DefaultApprovalTally,
@@ -227,7 +228,6 @@ impl Vote {
         let mut num_voters = 0;
         match self.kind {
             VOTE_APPROVAL => {
-                // TODO macro this copy paste stuff
                 let mut tally = DefaultApprovalTally::new(1);
 
                 for (_, cv) in &self.submittedvotes {
@@ -314,23 +314,26 @@ fn create_user_message<'a, 'b, 'c>(mut c: &'b mut CreateComponents, vals: &'c Ve
         });
     }
     // add a row for the movement and submit buttons
-    c.create_action_row(|r| {
-        r
-            .create_button(|btn| {
-                btn.custom_id(ID_VOTE_LEFT)
-                    .style(ButtonStyle::Secondary)
-                    .label("<")
-            })
-            .create_button(|btn| {
-                btn.custom_id(ID_VOTE_RIGHT)
-                    .style(ButtonStyle::Secondary)
-                    .label(">")
-            })
-            .create_button(|btn| {
-                btn.custom_id(ID_VOTE_SUBMIT)
-                    .style(ButtonStyle::Primary)
-                    .label("Submit")
-            })
+    let donav = vals.len() > PERPAGE && page == 0;
+    c.create_action_row(|mut r| {
+        if donav {
+            r = r
+                .create_button(|btn| {
+                    btn.custom_id(ID_VOTE_LEFT)
+                        .style(ButtonStyle::Secondary)
+                        .label("<")
+                })
+                .create_button(|btn| {
+                    btn.custom_id(ID_VOTE_RIGHT)
+                        .style(ButtonStyle::Secondary)
+                        .label(">")
+                });
+        }
+        r.create_button(|btn| {
+            btn.custom_id(ID_VOTE_SUBMIT)
+                .style(ButtonStyle::Primary)
+                .label("Submit")
+        })
     })
 }
 
@@ -659,7 +662,6 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
                     };
 
                     let errresp = if badvalue {
-                        //TODO display an error or something?
                         println!("Changing bad value {:?} to 0.0", it.value);
                         format!("\nError: Bad Value")
                     } else {
@@ -847,7 +849,6 @@ impl EventHandler for Handler {
         }).await.unwrap();
 
         // now from the interaction above we can create the vote for everyone in the channel
-        //TODO test short timeout, see if collectors stop in select right
         start_vote(&ctx, msg.channel_id, votetype, vals, DEFAULT_TIMEOUT).await;
 
     }
