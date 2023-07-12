@@ -434,6 +434,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
         })
         .build();
 
+    // This is our select loop where we wait on any interactions relevant to this vote
     loop {
         tokio::select! {
             Some(interaction) = mainbtn_col.next() => {
@@ -692,11 +693,16 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
                 }
             }
             else => {
-                println!("Ending collection for vote! Timed out?");
+                println!("Ending collection for vote! Timed out");
                 break
             }
         };
-    }
+    } // end select loop
+
+    // update the main message to indicate the vote is over, could display final results too, if we wanted?
+    cid.edit_message(ctx, basemsg.id, |e| {
+        e.content(format!("Vote Finished")).components(|c| c)
+    }).await.unwrap();
 
 }
 
@@ -705,6 +711,7 @@ struct Handler;
 #[async_trait]
 impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
+        // TODO structure this by command, add a help command
         if msg.content != "letsvote" {
             return;
         }
@@ -737,9 +744,6 @@ impl EventHandler for Handler {
             })
         }).await.unwrap();
 
-        //DEBUG
-        //println!("dm: {:?}", dm);
-
         // Collect the vote type first
         let interaction = match dm.await_component_interaction(&ctx).timeout(Duration::from_secs(60 * 3)).await {
             Some(x) => x,
@@ -748,9 +752,6 @@ impl EventHandler for Handler {
                 return;
             }
         };
-
-        //DEBUG
-        //println!("vote type int: {:?}", interaction);
 
         let votetype = VoteType::from_string(&interaction.data.values[0]);
         println!("Type choosen: {:?}", votetype);
@@ -802,9 +803,6 @@ impl EventHandler for Handler {
                 return;
             }
         };
-
-        //DEBUG
-        //println!("modal submit int: {:?}", interaction);
 
         if interaction.data.components.len() < 1 {
             interaction.create_interaction_response(&ctx, |r| {
