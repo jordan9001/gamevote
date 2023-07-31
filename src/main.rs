@@ -14,10 +14,11 @@ use serenity::{
         application::interaction::InteractionResponseType,
         application::component::InputTextStyle,
         application::component::ButtonStyle,
-        prelude::{prelude::component::ActionRowComponent, ChannelId, UserId, MessageId},
+        prelude::{component::ActionRowComponent, ChannelId, UserId, User, MessageId},
     },
     collector::{ModalInteractionCollectorBuilder, ComponentInteractionCollectorBuilder},
     builder::CreateComponents,
+    utils::{content_safe, ContentSafeOptions},
 };
 use tallystick::{
     approval::DefaultApprovalTally,
@@ -25,8 +26,21 @@ use tallystick::{
     score::ScoreTally,
 };
 
-const ID_VOTE_OPTIONS_INPUT: &str = "InputOptions";
-const ID_VOTE_TYPE: &str = "VoteKind";
+const ID_BUILD_TYPE: &str = "VoteKind";
+const ID_BUILD_SUG_BTN: &str = "SugBtn";
+const ID_BUILD_PING_BTN: &str = "PingBtn";
+const ID_BUILD_DUR_BTN: &str = "DurBtn";
+const ID_BUILD_CHOICE_BTN: &str = "ValBtn";
+const ID_BUILD_SUBMIT: &str = "BuildSubmit";
+const ID_BUILD_CANCEL: &str = "BuildCancel";
+const ID_BUILD_VAL_INPUT: &str = "BuildValModal";
+const ID_BUILD_VAL_INPUT_TXT: &str = "BuildValIn";
+const ID_BUILD_DUR_INPUT: &str = "BuildDurModal";
+const ID_BUILD_DUR_INPUT_TXT: &str = "BuildDurIn";
+const ID_SUG_VAL_BTN: &str = "SugVBtn";
+const ID_SUG_VAL_INPUT: &str = "SugVBtn";
+const ID_SUG_VAL_INPUT_TXT: &str = "SugVBtn";
+const ID_SUG_SUB_BTN: &str = "SugSubBtn";
 const ID_VOTE_VAL_PREFIX: &str = "VoteVal";
 const ID_VOTE_VAL_INPUT: &str = "ValInModal";
 const ID_VOTE_VAL_INPUT_PREFIX: &str = "ValIn";
@@ -35,7 +49,12 @@ const ID_VOTE_LEFT: &str = "VoteLeft";
 const ID_VOTE_RIGHT: &str = "VoteRight";
 const ID_VOTE_SUBMIT: &str = "VoteSubmit";
 
+const VOTE_DM_CONT: &str = "Create a new Vote:";
+
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60*60*9);
+const VOTE_DM_TIMEOUT: Duration = Duration::from_secs(60*60*1);
+const MAX_DUR_HR: f64 = 24.0*6.0;
+const MIN_DUR_HR: f64 = 0.1;
 const PERPAGE: usize = 4;
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -74,12 +93,63 @@ impl VoteType {
         }
     }
 
-    fn is_bad_value(&self, v: f32, vals: &Vec<&str>) -> bool {
+    fn is_bad_value(&self, v: f32, vals: &Vec<String>) -> bool {
         match *self {
             VOTE_APPROVAL => false,
             VOTE_SCORE => v < -10.0 || v > 10.0,
             VOTE_BORDA => v.fract() != 0.0 || v <= 0.0 || v > (vals.len() as f32),
             _ => panic!("Tried to test value for unknown vote type! {:?}", self),
+        }
+    }
+
+    fn get_all() -> Vec<Self> {
+        vec![VOTE_APPROVAL, VOTE_SCORE, VOTE_BORDA]
+    }
+}
+
+
+#[derive(Debug)]
+struct VoteInfo {
+    kind: VoteType,
+    take_sugs: bool,
+    ping_chan: u8,
+    //show_voters: bool,
+    //show_suggers: bool,
+    //results_at_timeout: bool,
+    timeout: Duration,
+    vals: Vec<String>,
+}
+
+impl VoteInfo {
+    fn new() -> Self {
+        VoteInfo {
+            kind: VOTE_APPROVAL,
+            take_sugs: false,
+            ping_chan: 0,
+            timeout: DEFAULT_TIMEOUT,
+            vals: Vec::new(),
+        }
+    }
+
+    fn submittable(&self) -> bool {
+        self.vals.len() > 1 || self.take_sugs
+    }
+
+    fn get_timeout_str(&self) -> String {
+        let fsec = self.timeout.as_secs_f64() / (60.0 * 60.0);
+        if fsec.fract() == 0.0 {
+            format!("{}", fsec)
+        } else {
+            format!("{:.1}", fsec)
+        }
+    }
+
+    fn get_ping(&self) -> String {
+        match self.ping_chan {
+            0 => "".into(),
+            1 => "@here ".into(),
+            2 => "@everyone ".into(),
+            _ => panic!("Unknown ping_chan value"),
         }
     }
 }
@@ -224,7 +294,7 @@ impl Vote {
         }
     }
 
-    fn get_results(&self, vals: &Vec<&str>) -> String {
+    fn get_results(&self, vals: &Vec<String>) -> String {
         let mut num_voters = 0;
         match self.kind {
             VOTE_APPROVAL => {
@@ -265,9 +335,9 @@ impl Vote {
 // a macro because the builder for creating and editing have the same functions, but different types
 // maybe serenity should put those in a trait
 macro_rules! setup_base_message {
-    ($m:expr, $num_votes:expr, $vtype:expr) => {
+    ($m:expr, $num_votes:expr, $vtype:expr, $ping:expr) => {
         $m
-            .content(format!("{} Vote: {} Votes so far", $vtype, $num_votes))
+            .content(format!("{}{} Vote: {} Votes so far", $ping, $vtype, $num_votes))
             .components(|c| {
                 c.create_action_row(|r| {
                     r.create_button(|btn| {
@@ -280,7 +350,7 @@ macro_rules! setup_base_message {
     };
 }
 
-fn create_user_message<'a, 'b, 'c>(mut c: &'b mut CreateComponents, vals: &'c Vec<&'a str>, page: usize, vote: &'c Vote, uid: UserId) -> &'b mut CreateComponents {
+fn create_user_message<'a, 'b, 'c>(mut c: &'b mut CreateComponents, vals: &'c Vec<String>, page: usize, vote: &'c Vote, uid: UserId) -> &'b mut CreateComponents {
     let i = page * PERPAGE;
     for j in 0..PERPAGE {
         let vali = i + j;
@@ -371,13 +441,16 @@ macro_rules! user_vote_message {
     };
 }
 
-async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec<&str>, timeout: Duration) {
+async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
+    let pingstr = vi.get_ping();
+    let VoteInfo{kind: votetype, vals, timeout, .. } = vi;
+
     let vote = Arc::new(RwLock::new(Vote::new(votetype)));
     let num_pages = ((vals.len() -1) / PERPAGE) + 1;
 
     // actually let's try just having a "vote" button, so we can edit the ephemeral button to match each user
     let basemsg = cid.send_message(ctx, |m| {
-        setup_base_message!(m, 0, votetype.to_string())
+        setup_base_message!(m, 0, votetype.to_string(), pingstr)
     }).await.unwrap();
 
     // send a ephemeral message (or multiple) to the channel for everyone, with the voting options
@@ -540,7 +613,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
                             // update the count
                             if isfirst {
                                 cid.edit_message(ctx, basemsg.id, |e| {
-                                    setup_base_message!(e, subcount, votetype.to_string())
+                                    setup_base_message!(e, subcount, votetype.to_string(), pingstr)
                                 }).await.unwrap();
                             }
 
@@ -694,7 +767,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
             }
             else => {
                 println!("Ending collection for vote! Timed out");
-                break
+                break;
             }
         };
     } // end select loop
@@ -706,149 +779,530 @@ async fn start_vote(ctx: &Context, cid: ChannelId, votetype: VoteType, vals: Vec
 
 }
 
+fn create_sug_comp<'a, 'b>(mut c: &'a mut CreateComponents) -> &'a mut CreateComponents {
+    // vote suggestion modal
+    c = c.create_action_row(|r| {
+        r.create_button(|b| {
+            b
+                .custom_id(ID_SUG_VAL_BTN)
+                .style(ButtonStyle::Primary)
+                .label("Add Suggestion")
+        })
+    });
+
+    // finish suggestions, start vote
+    c = c.create_action_row(|r| {
+        r.create_button(|b| {
+            b
+                .custom_id(ID_SUG_SUB_BTN)
+                .style(ButtonStyle::Secondary)
+                .label("Start Vote")
+        })
+    });
+
+    c
+}
+
+macro_rules! setup_sug_message {
+    ($m:expr, $vi:expr) => {
+        {
+            let mut sug_msg = format!("{}Submit suggestions for the vote!\nSuggestions so far:\n", $vi.get_ping());
+
+            for c in &$vi.vals {
+                sug_msg.push_str(&c);
+                sug_msg.push_str("\n");
+            }
+
+            $m
+                .content(sug_msg)
+                .components(create_sug_comp)
+        }
+    };
+}
+
+async fn handle_suggestion_phase(ctx: &Context, author: &User, cid: ChannelId, mut vi: VoteInfo) {
+    // create the message in channel inviting choices
+
+    // the vote creator can edit them all, removing suggestions, and can submit
+    // if others try to submit, they get an ephemeral msg saying "only _ can"
+
+    let mut msg = cid.send_message(&ctx, |m| {
+        setup_sug_message!(m, vi)
+    }).await.unwrap();
+
+    // create the collectors
+    let mut m_col = msg.await_component_interactions(&ctx)
+        .timeout(vi.timeout)
+        .build();
+
+    // modal interactions collector
+    let mut mod_col = ModalInteractionCollectorBuilder::new(&ctx)
+        .timeout(vi.timeout)
+        .message_id(msg.id)
+        .build();
+
+    // handle events
+    let mut do_vote = false;
+    loop {
+        tokio::select! {
+            Some(interaction) = m_col.next() => {
+                let is_author = interaction.user.id == author.id;
+
+                match &interaction.data.custom_id[..] {
+                    ID_SUG_VAL_BTN => {
+                        // author can edit everything, others just get a one line thing
+                        interaction.create_interaction_response(&ctx, |resp| {
+                            resp.kind(InteractionResponseType::Modal).interaction_response_data(|d| {
+                                d
+                                    .custom_id(ID_SUG_VAL_INPUT)
+                                    .title(
+                                        if is_author {
+                                            "Edit Choices"
+                                        } else {
+                                            "Add a Choice"
+                                        }
+                                    )
+                                    .components(|c| {
+                                        c.create_action_row(|r| {
+                                            r.create_input_text(|mut t| {
+                                                t = t
+                                                    .custom_id(ID_SUG_VAL_INPUT_TXT)
+                                                    .required(true);
+                                                if !is_author {
+                                                    t = t
+                                                        .style(InputTextStyle::Short)
+                                                        .label("Choice")
+                                                        .min_length(1)
+                                                        .max_length(60);
+                                                } else {
+                                                    t = t
+                                                        .style(InputTextStyle::Paragraph)
+                                                        .label("Choices (one per line)")
+                                                        .min_length(1)
+                                                        .max_length(1200);
+
+                                                        if vi.vals.len() > 0 {
+                                                            t = t.value(vi.vals.join("\n"));
+                                                        }
+                                                }
+
+                                                t
+                                            })
+                                        })
+                                    })
+                            })
+                        }).await.unwrap();
+                    },
+                    ID_SUG_SUB_BTN => {
+                        // only the author can hit this
+                        if !is_author {
+                            interaction.create_interaction_response(&ctx, |resp| {
+                                resp.kind(InteractionResponseType::ChannelMessageWithSource).interaction_response_data(|d| {
+                                    d
+                                        .content(format!("Sorry, only {} can start the vote", author.name))
+                                        .ephemeral(true)
+                                })
+                            }).await.unwrap();
+                        } else {
+                            interaction.create_interaction_response(&ctx, |resp| {
+                                resp.kind(InteractionResponseType::UpdateMessage).interaction_response_data(|d| {
+                                    d
+                                        .content("Starting Vote...")
+                                        .components(|c| c)
+                                })
+                            }).await.unwrap();
+
+                            // actually move on now
+                            do_vote = true;
+                            break;
+                        }
+                    }
+                    _ => {
+                        panic!("Got unexpected button id on the sug msg");
+                    },
+                }
+            },
+            Some(interaction) = mod_col.next() => {
+                let is_author = interaction.user.id == author.id;
+
+                match &interaction.data.custom_id[..] {
+                    ID_SUG_VAL_INPUT => {
+                        if let ActionRowComponent::InputText(it) = &interaction.data.components[0].components[0] {
+                            let v = content_safe(&ctx, &it.value, &ContentSafeOptions::default(), &[]);
+
+                            // if this is from the author, we need to replace everything
+                            // otherwise just add them on if they are unique
+
+                            let newvals = v.split('\n').map(|x| String::from(x.trim())).collect();
+
+                            if is_author {
+                                vi.vals = newvals;
+                            } else {
+                                for val in newvals {
+                                    if !vi.vals.contains(&val) {
+                                        vi.vals.push(val);
+                                    }
+                                }
+                            }
+
+                        } else {
+                            panic!("No input found on sug modal");
+                        }
+                    },
+                    _ => {
+                        panic!("Got unexpected modal id on the sug msg");
+                    }
+                }
+
+                // update the dm
+                interaction.create_interaction_response(&ctx, |resp| {
+                    resp.kind(InteractionResponseType::UpdateMessage).interaction_response_data(|d| {
+                        setup_sug_message!(d, vi)
+                    })
+                }).await.unwrap();
+            }
+            else => {
+                println!("Ending collection for sug msg! Timed out");
+                // update the dm to say so
+                msg.edit(&ctx, |e| {
+                    e.content("Vote suggestion timed out").components(|c| c)
+                }).await.unwrap();
+                break;
+            }
+        }
+    } // end select loop
+
+    // drop the collectors first, for cleanliness
+    drop(m_col);
+    drop(mod_col);
+
+    if do_vote {
+        start_vote(ctx, cid, vi).await;
+    }
+}
+
+fn create_dm_vote_comp<'a, 'b>(mut c: &'a mut CreateComponents, vi: &'b VoteInfo) -> &'a mut CreateComponents {
+    // vote type selection
+    c = c.create_action_row(|r| {
+        r.create_select_menu(|u| {
+            u
+                .custom_id(ID_BUILD_TYPE)
+                .min_values(1)
+                .max_values(1)
+                .options(|mut o| {
+                    for vtype in VoteType::get_all() {
+                        o = o.create_option(|mut p| {
+                            p = p.label(vtype).value(vtype);
+                            // if this is the selected, set it
+                            if vi.kind == vtype {
+                                p = p.default_selection(true);
+                            }
+                            p
+                        });
+                    }
+                    o
+                })
+        })
+    });
+    // options
+    c = c.create_action_row(|mut r| {
+        // suggestion phase
+        r = r.create_button(|b| {
+            b
+                .custom_id(ID_BUILD_SUG_BTN)
+                .style(ButtonStyle::Secondary)
+                .label(format!("Take Vote Choice Suggestions = {}",
+                    if vi.take_sugs {
+                        "Yes"
+                    } else {
+                        "No"
+                    }
+                ))
+        });
+
+        // ping options
+        r = r.create_button(|b| {
+            b
+                .custom_id(ID_BUILD_PING_BTN)
+                .style(ButtonStyle::Secondary)
+                .label(format!("Ping Channel = {}",
+                    match vi.ping_chan {
+                        0 => "No",
+                        1 => "@here",
+                        2 => "@everyone",
+                        _ => panic!("ping_chan invalid value"),
+                    }
+                ))
+        });
+
+        // timeout
+        r = r.create_button(|b| {
+            b
+                .custom_id(ID_BUILD_DUR_BTN)
+                .style(ButtonStyle::Secondary)
+                .label(format!("Vote Timeout = {} hr",
+                    vi.get_timeout_str()
+                ))
+        });
+
+        //TODO options to turn off anonymity for suggestion and/or votes
+
+        r
+    });
+    // add/edit choices
+    c = c.create_action_row(|r| {
+        r.create_button(|b|{
+            b
+                .custom_id(ID_BUILD_CHOICE_BTN)
+                .style(ButtonStyle::Primary)
+                .label(
+                    if vi.vals.len() == 0 {
+                        String::from("Add Vote Choices")
+                    } else {
+                        format!("Edit Choices ({} choices)", vi.vals.len())
+                    }
+                )
+        })
+    });
+    // submit, cancel
+    c = c.create_action_row(|mut r| {
+        r = r.create_button(|b| {
+            b
+                .custom_id(ID_BUILD_SUBMIT)
+                .style(ButtonStyle::Success)
+                .label("Start")
+                .disabled(!vi.submittable())
+        });
+        r = r.create_button(|b| {
+            b
+                .custom_id(ID_BUILD_CANCEL)
+                .style(ButtonStyle::Danger)
+                .label("Cancel")
+        });
+
+        r
+    });
+    c
+}
+
+async fn handle_dm_vote(ctx: Context, msg: Message) {
+    let mut vi = VoteInfo::new();
+
+    // create initial dm to the person creating the vote
+    // this will get edited as options are changed
+    let mut dm: Message = msg.author.direct_message(&ctx, |m| {
+        m.content(VOTE_DM_CONT).components(|c| {
+            create_dm_vote_comp(c, &vi)
+        })
+    }).await.unwrap();
+
+
+    // create collectors for the interaction with the DM and it's modals
+
+    let mut dm_col = dm.await_component_interactions(&ctx)
+        .timeout(VOTE_DM_TIMEOUT)
+        .build();
+
+    // modal interactions collector
+    let mut mod_col = ModalInteractionCollectorBuilder::new(&ctx)
+        .timeout(VOTE_DM_TIMEOUT)
+        .message_id(dm.id)
+        .build();
+
+    // select on the interactions for a given time
+    let mut do_vote = false;
+    loop {
+        tokio::select! {
+            Some(interaction) = dm_col.next() => {
+                let mut update_dm = true;
+                match &interaction.data.custom_id[..] {
+                    ID_BUILD_TYPE => {
+                        // collect the chosen type
+                        vi.kind = VoteType::from_string(&interaction.data.values[0]);
+                    },
+                    ID_BUILD_SUG_BTN => {
+                        vi.take_sugs = !vi.take_sugs;
+                    },
+                    ID_BUILD_PING_BTN => {
+                        vi.ping_chan += 1;
+                        if vi.ping_chan >= 3 {
+                            vi.ping_chan = 0;
+                        }
+                    },
+                    ID_BUILD_DUR_BTN => {
+                        // send modal to get a different duration
+                        interaction.create_interaction_response(&ctx, |resp| {
+                            resp.kind(InteractionResponseType::Modal).interaction_response_data(|d| {
+                                d
+                                    .custom_id(ID_BUILD_DUR_INPUT)
+                                    .title("Hours Till Timeout")
+                                    .components(|c| {
+                                        c.create_action_row(|r| {
+                                            r.create_input_text(|t| {
+                                                t
+                                                    .custom_id(ID_BUILD_DUR_INPUT_TXT)
+                                                    .style(InputTextStyle::Short)
+                                                    .label("# Hours")
+                                                    .min_length(1)
+                                                    .max_length(6)
+                                                    .required(true)
+                                                    .value(vi.get_timeout_str())
+                                            })
+                                        })
+                                    })
+                            })
+                        }).await.unwrap();
+
+                        update_dm = false;
+                    },
+                    ID_BUILD_CHOICE_BTN => {
+                        // send modal to edit choices
+                        interaction.create_interaction_response(&ctx, |resp| {
+                            resp.kind(InteractionResponseType::Modal).interaction_response_data(|d| {
+                                d
+                                    .custom_id(ID_BUILD_VAL_INPUT)
+                                    .title("Vote Choices (one per line)")
+                                    .components(|c| {
+                                        c.create_action_row(|r| {
+                                            r.create_input_text(|mut t| {
+                                                t = t
+                                                    .custom_id(ID_BUILD_VAL_INPUT_TXT)
+                                                    .style(InputTextStyle::Paragraph)
+                                                    .label("Choices")
+                                                    .min_length(1)
+                                                    .max_length(600)
+                                                    .required(true);
+                                                
+                                                if vi.vals.len() > 0 {
+                                                    t = t.value(vi.vals.join("\n"));
+                                                }
+
+                                                t
+                                            })
+                                        })
+                                    })
+                            })
+                        }).await.unwrap();
+
+                        update_dm = false;
+                    },
+                    ID_BUILD_SUBMIT => {
+                        println!("Creating vote with options: {:?}", vi);
+
+                        let update_content: String = if vi.take_sugs {
+                            "Vote Created\nHit 'Start Vote' in the channel to end the suggestion phase. You can edit and remove other's suggestions from there as well with the 'Add Suggestion' button.".into()
+                        } else {
+                            "Vote Created".into()
+                        };
+
+                        // start the vote or the sug phase
+                        interaction.create_interaction_response(&ctx, |resp| {
+                            resp.kind(InteractionResponseType::UpdateMessage).interaction_response_data(|d| {
+                                d.content(update_content).components(|c| c)
+                            })
+                        }).await.unwrap();
+
+                        // also start the vote
+                        do_vote = true;
+                        break;
+                    },
+                    ID_BUILD_CANCEL => {
+                        interaction.create_interaction_response(&ctx, |resp| {
+                            resp.kind(InteractionResponseType::UpdateMessage).interaction_response_data(|d| {
+                                d.content("Canceled").components(|c| c)
+                            })
+                        }).await.unwrap();
+
+                        break;
+                    },
+                    _ => {
+                        panic!("Got unexpected button id on the dm");
+                    }
+                }
+                if update_dm {
+                    interaction.create_interaction_response(&ctx, |resp| {
+                        resp.kind(InteractionResponseType::UpdateMessage).interaction_response_data(|d| {
+                            d.content(VOTE_DM_CONT).components(|c| {
+                                create_dm_vote_comp(c, &vi)
+                            })
+                        })
+                    }).await.unwrap();
+                }
+            },
+            Some(interaction) = mod_col.next() => {
+                match &interaction.data.custom_id[..] {
+                    ID_BUILD_DUR_INPUT => {
+                        if let ActionRowComponent::InputText(it) = &interaction.data.components[0].components[0] {
+                            if let Ok(hrs) = it.value.parse::<f64>() {
+                                if hrs >= MIN_DUR_HR && hrs <= MAX_DUR_HR {
+                                    vi.timeout = Duration::from_secs_f64(hrs * 60.0 * 60.0);
+                                } else {
+                                    println!("Not accepting bad duration amount");
+                                }
+                            } else {
+                                println!("Not accepting non-number duration amount");
+                            }
+                        } else {
+                            panic!("No input found on timeout option dm modal");
+                        }
+                    },
+                    ID_BUILD_VAL_INPUT => {
+                        if let ActionRowComponent::InputText(it) = &interaction.data.components[0].components[0] {
+                            let v = content_safe(&ctx, &it.value, &ContentSafeOptions::default(), &[]);
+                            vi.vals = v.split('\n').map(|x| String::from(x.trim())).collect();
+
+                        } else {
+                            panic!("No input found on val dm modal");
+                        }
+                    },
+                    _ => {
+                        panic!("Got unexpected modal id on the dm");
+                    }
+                }
+
+                // update the dm
+                interaction.create_interaction_response(&ctx, |resp| {
+                    resp.kind(InteractionResponseType::UpdateMessage).interaction_response_data(|d| {
+                        d.content(VOTE_DM_CONT).components(|c| {
+                            create_dm_vote_comp(c, &vi)
+                        })
+                    })
+                }).await.unwrap();
+            }
+            else => {
+                println!("Ending collection for dm interactions! Timed out");
+                // update the dm to say so
+                dm.edit(&ctx, |e| {
+                    e.content("Vote creation timed out").components(|c| c)
+                }).await.unwrap();
+                break;
+            }
+        }
+    } // end select loop
+
+    drop(mod_col);
+    drop(dm_col);
+
+    if do_vote {
+        if vi.take_sugs {
+            // start suggestion path
+            handle_suggestion_phase(&ctx, &msg.author, msg.channel_id, vi).await;
+        } else {
+            // just start the vote
+            start_vote(&ctx, msg.channel_id, vi).await
+        }
+    }
+
+}
+
 struct Handler;
 
 #[async_trait]
 impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
-        // TODO structure this by command, add a help command
-        if msg.content != "letsvote" {
-            return;
+        if msg.content == "letsvote" {
+            handle_dm_vote(ctx, msg).await;
         }
-
-        let dm = msg.author.direct_message(&ctx, |m| {
-            m.content("Choose a Vote Type:").components(|c| {
-                c.create_action_row(|r| {
-                    // create select menu for selecting the type of vote
-                    r.create_select_menu(|u| {
-                        u.custom_id(ID_VOTE_TYPE)
-                            .min_values(1)
-                            .max_values(1)
-                            .options(|o| {
-                                o.create_option(|p| {
-                                    p.label(VOTE_APPROVAL)
-                                        .value(VOTE_APPROVAL)
-                                })
-                                .create_option(|p| {
-                                    p.label(VOTE_SCORE)
-                                        .value(VOTE_SCORE)
-                                })  
-                                .create_option(|p| {
-                                    p.label(VOTE_BORDA)
-                                        .value(VOTE_BORDA)
-                                })  
-                            })
-
-                    })
-                })
-            })
-        }).await.unwrap();
-
-        // Collect the vote type first
-        let interaction = match dm.await_component_interaction(&ctx).timeout(Duration::from_secs(60 * 3)).await {
-            Some(x) => x,
-            None => {
-                dm.reply(&ctx, "Timed out").await.unwrap();
-                return;
-            }
-        };
-
-        let votetype = VoteType::from_string(&interaction.data.values[0]);
-        println!("Type choosen: {:?}", votetype);
-
-        interaction.create_interaction_response(&ctx, |r| {
-            r.kind(InteractionResponseType::Modal).interaction_response_data(|d| {
-                d.custom_id(ID_VOTE_OPTIONS_INPUT)
-                    .title("Comma Separated Vote Choices")
-                    .components(|c| {
-                        c.create_action_row(|r| {
-                            // create text input for adding the options
-                            r.create_input_text(|t| {
-                                t.custom_id(ID_VOTE_OPTIONS_INPUT)
-                                    .style(InputTextStyle::Paragraph)
-                                    .label("Choices")
-                                    .min_length(2)
-                                    .max_length(600)
-                                    .required(true)
-                            })
-                        })
-                    })
-            })
-        }).await.unwrap();
-
-        // wait again for the next interaction
-        let mut collector = ModalInteractionCollectorBuilder::new(&ctx)
-            .collect_limit(1)
-            .timeout(Duration::from_secs(60*9))
-            .filter(move |i| -> bool {
-                if i.data.custom_id != ID_VOTE_OPTIONS_INPUT {
-                    return false;
-                }
-                if let Some(m) = &i.message {
-                    return m.id == dm.id; // make sure it is the interaction for our DM's modal
-                } else {
-                    return false;
-                }
-            })
-            .build();
-
-        // TODO this is all a bit brittle
-        // we need to handle the case where we click away, then want to get the modal back
-        // or at least update the message to say, "Cancled"
-
-        let interaction = match collector.next().await {
-            Some(x) => x,
-            None => {
-                dm.reply(&ctx, "Timed out waiting for choices").await.unwrap();
-                return;
-            }
-        };
-
-        if interaction.data.components.len() < 1 {
-            interaction.create_interaction_response(&ctx, |r| {
-                r.kind(InteractionResponseType::UpdateMessage).interaction_response_data(|d| {
-                    d.content(format!("Error, no response")).components(|c| c)
-                })
-            }).await.unwrap();
-            return;
-        }
-
-        let row = &interaction.data.components[0];
-        if row.components.len() < 1 {
-            interaction.create_interaction_response(&ctx, |r| {
-                r.kind(InteractionResponseType::UpdateMessage).interaction_response_data(|d| {
-                    d.content(format!("Error, empty response row")).components(|c| c)
-                })
-            }).await.unwrap();
-            return;
-        }
-
-        
-        let valstr = match &row.components[0] {
-            ActionRowComponent::InputText(txt) => &txt.value,
-            _ => {
-                interaction.create_interaction_response(&ctx, |r| {
-                    r.kind(InteractionResponseType::UpdateMessage).interaction_response_data(|d| {
-                        d.content(format!("Choices are required")).components(|c| c)
-                    })
-                }).await.unwrap();
-                return;
-            }
-        };
-
-        let vals: Vec<&str> = valstr.split(',').map(|x| x.trim()).collect();
-        println!("Choices: {:?}", vals);
-
-        // update dm to show it submitted
-        interaction.create_interaction_response(&ctx, |r| {
-            r.kind(InteractionResponseType::UpdateMessage).interaction_response_data(|d| {
-                d.content(format!("Vote Created")).components(|c| c)
-            })
-        }).await.unwrap();
-
-        // now from the interaction above we can create the vote for everyone in the channel
-        start_vote(&ctx, msg.channel_id, votetype, vals, DEFAULT_TIMEOUT).await;
-
     }
 
     async fn ready(&self, _ctx: Context, _data: Ready) {
