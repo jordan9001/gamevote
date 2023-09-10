@@ -1025,13 +1025,18 @@ async fn handle_suggestion_phase(ctx: &Context, author: &User, cid: ChannelId, m
             else => {
                 println!("Ending collection for sug msg! Timed out");
                 // update the msg to say so
-                msg.edit(&ctx, |e| {
-                    e.content("Time Up! Starting Vote...").components(|c| c)
-                }).await.unwrap();
 
-                // Should we do vote here? Have an option for it?
                 if vi.vals.len() > 1 {
+                    msg.edit(&ctx, |e| {
+                        e.content("Time Up! Starting Vote...").components(|c| c)
+                    }).await.unwrap();
+
                     do_vote = true;
+
+                } else {
+                    msg.edit(&ctx, |e| {
+                        e.content("Time Up! Insufficient options to start vote").components(|c| c)
+                    }).await.unwrap();
                 }
                 break;
             }
