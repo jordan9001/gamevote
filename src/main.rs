@@ -63,13 +63,15 @@ const PERPAGE: usize = 4;
 struct VoteType(u32);
 const VOTE_APPROVAL: VoteType   = VoteType(1 << 0);
 const VOTE_SCORE: VoteType      = VoteType(1 << 1);
-const VOTE_BORDA: VoteType      = VoteType(1 << 2);
+const VOTE_LSCORE: VoteType     = VoteType(1 << 2);
+const VOTE_BORDA: VoteType      = VoteType(1 << 3);
 
 impl ToString for VoteType {
     fn to_string(&self) -> String {
         match *self {
             VOTE_APPROVAL => "Approval".into(),
             VOTE_SCORE => "Score".into(),
+            VOTE_LSCORE => "Limited Score".into(),
             VOTE_BORDA => "Borda".into(),
             _ => panic!("Unknown vote type! {:?}", self),
         }
@@ -81,6 +83,7 @@ impl VoteType {
         match &s[..] {
             "Approval" => VOTE_APPROVAL,
             "Score" => VOTE_SCORE,
+            "Limited Score" => VOTE_LSCORE,
             "Borda" => VOTE_BORDA,
             _ => panic!("Tried to get a vote type from an unknown string! {}", s),
         }
@@ -90,6 +93,7 @@ impl VoteType {
         match *self {
             VOTE_APPROVAL => "choice".into(),
             VOTE_SCORE => "score (-10.0 to 10.0)".into(),
+            VOTE_LSCORE => "score where sum(abs(scores)) <= 10.0".into(),
             VOTE_BORDA => "rank (1 is 1st choice, 2 second, ...)".into(),
             _ => panic!("Tried to get value name for unknown vote type! {:?}", self),
         }
@@ -98,14 +102,14 @@ impl VoteType {
     fn is_bad_value(&self, v: f32, vals: &Vec<String>) -> bool {
         match *self {
             VOTE_APPROVAL => false,
-            VOTE_SCORE => v < -10.0 || v > 10.0,
+            VOTE_SCORE | VOTE_LSCORE => v < -10.0 || v > 10.0,
             VOTE_BORDA => v.fract() != 0.0 || v <= 0.0 || v > (vals.len() as f32),
             _ => panic!("Tried to test value for unknown vote type! {:?}", self),
         }
     }
 
     fn get_all() -> Vec<Self> {
-        vec![VOTE_APPROVAL, VOTE_SCORE, VOTE_BORDA]
+        vec![VOTE_APPROVAL, VOTE_SCORE, VOTE_LSCORE, VOTE_BORDA]
     }
 }
 
@@ -169,13 +173,14 @@ impl CastVotes {
         match vt {
             VOTE_APPROVAL => CastVotes::Select(Vec::new()),
             VOTE_SCORE => CastVotes::Score(HashMap::new()),
+            VOTE_LSCORE => CastVotes::Score(HashMap::new()),
             VOTE_BORDA => CastVotes::Score(HashMap::new()),
             _ => panic!("Tried to create CastVotes with unknown vote type"),
         }
     }
 
     fn get_vote_vec(&self) -> Vec<usize> {
-        // if this is a score, then order them from lowest to highest
+        // if this is a score, then order them from lowest to highest as a ranking
         // otherwise just return the vec
         match self {
             CastVotes::Select(v) => {
@@ -212,6 +217,20 @@ impl CastVotes {
         match vt {
             VOTE_APPROVAL => true,
             VOTE_SCORE => true,
+            VOTE_LSCORE => {
+                // check the sum(abs(scores))
+                let mut abssum: f32 = 0.0f32;
+
+                if let CastVotes::Score(hm) = self {
+                    for (_, score) in hm.iter() {
+                        abssum += score.abs();
+                    }
+                } else {
+                    panic!("Tried to check validity of a LSCORE with no score backing");
+                }
+
+                abssum < 10.0001f32
+            }
             VOTE_BORDA => {
                 // check every key is in there
                 // check each key has a non-zero rating
@@ -312,7 +331,7 @@ impl Vote {
 
                 tally_str!(tally, vals, self.kind, num_voters, extra)
             },
-            VOTE_SCORE => {
+            VOTE_SCORE | VOTE_LSCORE => {
                 let mut tally = ScoreTally::<usize, f32>::new(1);
 
                 for (_, cv) in &self.submittedvotes {
@@ -656,7 +675,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
 
                             if !valid_submission {
                                 // return an error to the user
-                                let errresp = format!("\nError: invalid values for a {} vote, please fix your vote", votetype.to_string());
+                                let errresp = format!("\nError: invalid values for a {} vote, please fix your vote.\nEach should be a {}", votetype.to_string(), votetype.value_name());
                                 user_vote_message!(interaction, uid, errresp, vote, ctx, num_pages, vals, false, vote_once);
                             } else {
                                 // update the count
