@@ -120,9 +120,9 @@ struct VoteInfo {
     take_sugs: bool,
     show_at_timeout: bool,
     vote_once: bool,
+    //TODO show_before_end: bool,
+    //TODO early_stop: bool,
     ping_chan: u8,
-    //show_voters: bool,
-    //show_suggers: bool,
     timeout: Duration,
     vals: Vec<String>,
 }
@@ -1166,8 +1166,6 @@ fn create_dm_vote_comp<'a, 'b>(mut c: &'a mut CreateComponents, vi: &'b VoteInfo
                     vi.get_timeout_str()
                 ))
         });
-
-        //TODO options to turn off anonymity for suggestion and/or votes
 
         r
     });
