@@ -360,6 +360,7 @@ impl Vote {
 // maybe serenity should put those in a trait
 macro_rules! setup_base_message {
     ($m:expr, $num_votes:expr, $vtype:expr, $ping:expr) => {
+        //TODO show timeout time
         $m
             .content(format!("{}{} Vote: {} Votes so far", $ping, $vtype, $num_votes))
             .components(|c| {
@@ -886,6 +887,7 @@ fn create_sug_comp<'a, 'b>(mut c: &'a mut CreateComponents) -> &'a mut CreateCom
 macro_rules! setup_sug_message {
     ($m:expr, $vi:expr) => {
         {
+            //TODO show timeout time
             let mut sug_msg = format!("{}Submit suggestions for the vote!\nSuggestions so far:\n", $vi.get_ping());
 
             for c in &$vi.vals {
