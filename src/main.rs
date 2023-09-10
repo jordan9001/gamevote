@@ -273,7 +273,7 @@ struct Vote {
 
 
 macro_rules! tally_str {
-    ($tally:expr, $vals:expr, $votetype:expr, $num_voters:expr) => {
+    ($tally:expr, $vals:expr, $votetype:expr, $num_voters:expr, $extra:expr) => {
     {
         let mut result: String = format!("{} Vote Results (with {} voters):\nWinner:\n", $votetype.to_string(), $num_voters);
         let winners = $tally.winners().all();
@@ -284,7 +284,7 @@ macro_rules! tally_str {
         for (w, c) in $tally.totals() {
             result.push_str(&format!("{}: {}\n", c, $vals[w]));
         }
-        result.push_str("\n Submit again to get fresh results");
+        result.push_str($extra);
         result
     }
     };
@@ -299,7 +299,7 @@ impl Vote {
         }
     }
 
-    fn get_results(&self, vals: &Vec<String>) -> String {
+    fn get_results(&self, vals: &Vec<String>, extra: &str) -> String {
         let mut num_voters = 0;
         match self.kind {
             VOTE_APPROVAL => {
@@ -310,7 +310,7 @@ impl Vote {
                     num_voters += 1;
                 }
 
-                tally_str!(tally, vals, self.kind, num_voters)
+                tally_str!(tally, vals, self.kind, num_voters, extra)
             },
             VOTE_SCORE => {
                 let mut tally = ScoreTally::<usize, f32>::new(1);
@@ -320,7 +320,7 @@ impl Vote {
                     num_voters += 1;
                 }
 
-                tally_str!(tally, vals, self.kind, num_voters)
+                tally_str!(tally, vals, self.kind, num_voters, extra)
             },
             VOTE_BORDA => {
                 let mut tally = DefaultBordaTally::new(1, tallystick::borda::Variant::Borda);
@@ -330,7 +330,7 @@ impl Vote {
                     num_voters += 1;
                 }
 
-                tally_str!(tally, vals, self.kind, num_voters)
+                tally_str!(tally, vals, self.kind, num_voters, extra)
             },
             _ => panic!("Tried to get results with unknown vote type"),
         }
@@ -676,7 +676,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
                             {
                                 let rvote = vote.read().unwrap();
 
-                                resultsmsg = rvote.get_results(&vals);
+                                resultsmsg = rvote.get_results(&vals, "\n Submit again to get fresh results");
                             }
 
                             // show them the vote results message
@@ -831,7 +831,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
         e.content(
             if show_at_timeout {
                 let rvote = vote.read().unwrap();
-                rvote.get_results(&vals)
+                rvote.get_results(&vals, "\nThanks!")
             } else {
                 format!("Vote Finished")
             }
