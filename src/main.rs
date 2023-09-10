@@ -28,6 +28,8 @@ use tallystick::{
 
 const ID_BUILD_TYPE: &str = "VoteKind";
 const ID_BUILD_SUG_BTN: &str = "SugBtn";
+const ID_BUILD_SHOWRES_BTN: &str = "ShowResBtn";
+const ID_BUILD_VOTEONE_BTN: &str = "OneVoteBtn";
 const ID_BUILD_PING_BTN: &str = "PingBtn";
 const ID_BUILD_DUR_BTN: &str = "DurBtn";
 const ID_BUILD_CHOICE_BTN: &str = "ValBtn";
@@ -51,10 +53,10 @@ const ID_VOTE_SUBMIT: &str = "VoteSubmit";
 
 const VOTE_DM_CONT: &str = "Create a new Vote:";
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60*60*9);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60*90);
 const VOTE_DM_TIMEOUT: Duration = Duration::from_secs(60*60*1);
 const MAX_DUR_HR: f64 = 24.0*6.0;
-const MIN_DUR_HR: f64 = 0.1;
+const MIN_DUR_HR: f64 = 0.01;
 const PERPAGE: usize = 4;
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -112,10 +114,11 @@ impl VoteType {
 struct VoteInfo {
     kind: VoteType,
     take_sugs: bool,
+    show_at_timeout: bool,
+    vote_once: bool,
     ping_chan: u8,
     //show_voters: bool,
     //show_suggers: bool,
-    //results_at_timeout: bool,
     timeout: Duration,
     vals: Vec<String>,
 }
@@ -125,6 +128,8 @@ impl VoteInfo {
         VoteInfo {
             kind: VOTE_APPROVAL,
             take_sugs: false,
+            show_at_timeout: true,
+            vote_once: false,
             ping_chan: 0,
             timeout: DEFAULT_TIMEOUT,
             vals: Vec::new(),
@@ -270,7 +275,7 @@ struct Vote {
 macro_rules! tally_str {
     ($tally:expr, $vals:expr, $votetype:expr, $num_voters:expr) => {
     {
-        let mut result: String = format!("{} Vote Results (so far: {} voters):\nWinner:\n", $votetype.to_string(), $num_voters);
+        let mut result: String = format!("{} Vote Results (with {} voters):\nWinner:\n", $votetype.to_string(), $num_voters);
         let winners = $tally.winners().all();
         for w in winners {
             result.push_str(&format!("{}\n", $vals[w]));
@@ -279,7 +284,7 @@ macro_rules! tally_str {
         for (w, c) in $tally.totals() {
             result.push_str(&format!("{}: {}\n", c, $vals[w]));
         }
-        result.push_str("\n Submit again to refresh your results");
+        result.push_str("\n Submit again to get fresh results");
         result
     }
     };
@@ -409,7 +414,7 @@ fn create_user_message<'a, 'b, 'c>(mut c: &'b mut CreateComponents, vals: &'c Ve
 
 // a macro because the different interaction types
 macro_rules! user_vote_message {
-    ($interaction:expr, $uid:expr, $extra:expr, $vote:expr, $ctx:expr, $num_pages:expr, $vals:expr, $first:expr) => {
+    ($interaction:expr, $uid:expr, $extra:expr, $vote:expr, $ctx:expr, $num_pages:expr, $vals:expr, $first:expr, $vote_once:expr) => {
         // edit or create the ephemeral
         let irkind: InteractionResponseType = if $first {
             InteractionResponseType::ChannelMessageWithSource
@@ -417,8 +422,14 @@ macro_rules! user_vote_message {
             InteractionResponseType::UpdateMessage
         };
 
+        let mut can_vote = true;
+
         let disppage = {
             let rvote = $vote.read().unwrap();
+
+            if $vote_once {
+                can_vote = !rvote.submittedvotes.contains_key(&$uid);
+            }
 
             if let Some(uv) = rvote.uservotes.get(&$uid) {
                 uv.page
@@ -427,23 +438,43 @@ macro_rules! user_vote_message {
             }
         };
 
-        $interaction.create_interaction_response($ctx, |resp| {
-            resp.kind(irkind).interaction_response_data(|d| {
-                d
-                    .content(format!("Page {}/{}{}", disppage+1, $num_pages, $extra))
-                    .components(|c| {
-                        let rvote = $vote.read().unwrap();
-                        create_user_message(c, &$vals, disppage, &rvote, $uid)
-                    })
-                    .ephemeral(true)
-            })
-        }).await.unwrap();
+        if can_vote {
+            $interaction.create_interaction_response($ctx, |resp| {
+                resp.kind(irkind).interaction_response_data(|d| {
+                    d
+                        .content(format!("Page {}/{}{}", disppage+1, $num_pages, $extra))
+                        .components(|c| {
+                            let rvote = $vote.read().unwrap();
+                            create_user_message(c, &$vals, disppage, &rvote, $uid)
+                        })
+                        .ephemeral(true)
+                })
+            }).await.unwrap();
+        } else {
+            // just give them a button to go forward
+            $interaction.create_interaction_response($ctx, |resp| {
+                resp.kind(irkind).interaction_response_data(|d| {
+                    d
+                        .content(format!("Vote Submitted{}", $extra))
+                        .components(|c| {
+                            c.create_action_row(|r| {
+                                r.create_button(|btn| {
+                                    btn.custom_id(ID_VOTE_SUBMIT)
+                                        .style(ButtonStyle::Primary)
+                                        .label("View Results")
+                                })
+                            })
+                        })
+                        .ephemeral(true)
+                })
+            }).await.unwrap();
+        }
     };
 }
 
 async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
     let pingstr = vi.get_ping();
-    let VoteInfo{kind: votetype, vals, timeout, .. } = vi;
+    let VoteInfo{kind: votetype, vals, timeout, show_at_timeout, vote_once, .. } = vi;
 
     let vote = Arc::new(RwLock::new(Vote::new(votetype)));
     let num_pages = ((vals.len() -1) / PERPAGE) + 1;
@@ -529,7 +560,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
                 }
 
                 // this button brings up a new ephemeral message for voting
-                user_vote_message!(interaction, uid, "", vote, ctx, num_pages, vals, true);
+                user_vote_message!(interaction, uid, "", vote, ctx, num_pages, vals, true, vote_once);
 
                 // get the response info
                 let respmsg = interaction.get_interaction_response(ctx).await.unwrap();
@@ -558,7 +589,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
                             if let Some(uv) = wvote.uservotes.get_mut(&uid) {
                                 // edit their message to the next page to the left
                                 let mut page = uv.page;
-                                if dir {
+                                if !dir {
                                     page += 1;
                                     if page >= num_pages {
                                         page = 0;
@@ -577,46 +608,69 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
                                 panic!("Somehow got a nav interaction without an entry in the vote map?")
                             }
                         }
-                        user_vote_message!(interaction, uid, "", vote, ctx, num_pages, vals, false);
+                        user_vote_message!(interaction, uid, "", vote, ctx, num_pages, vals, false, vote_once);
                     },
                     ID_VOTE_SUBMIT => {
-                        // submit the vote for this user, if we can
-                        // first check that it is a valid submission, and let them know if it is not
-                        let valid_submission;
-
-
                         let mut isfirst = false;
-                        let mut subcount = 0;
-                        {
-                            let mut wvote = vote.write().unwrap();
+                        let mut dosubmit = true;
+                        let mut showresults = false;
 
-                            if let Some(uv) = wvote.uservotes.get_mut(&uid) {
-                                valid_submission = uv.votes.are_valid(votetype, vals.len());
-
-                                if valid_submission {
-                                    let ballot = uv.votes.get_ballot(vals.len());
-                                    if wvote.submittedvotes.insert(uid, ballot).is_none() {
-                                        subcount = wvote.submittedvotes.len();
-                                        isfirst = true;
-                                    }
+                        // if vote_once, we need to check if they have already voted, and if so just show the results
+                        if vote_once {
+                            {
+                                let rvote = vote.read().unwrap();
+                                if !rvote.submittedvotes.contains_key(&uid) {
+                                    isfirst = true;
                                 }
-                            } else {
-                                panic!("No user but got submit");
+                            };
+
+                            if !isfirst {
+                                showresults = true;
+                                dosubmit = false;
                             }
                         }
 
-                        if !valid_submission {
-                            // return an error to the user
-                            let errresp = format!("\nError: invalid values for a {} vote, please fix your vote", votetype.to_string());
-                            user_vote_message!(interaction, uid, errresp, vote, ctx, num_pages, vals, false);
-                        } else {
-                            // update the count
-                            if isfirst {
-                                cid.edit_message(ctx, basemsg.id, |e| {
-                                    setup_base_message!(e, subcount, votetype.to_string(), pingstr)
-                                }).await.unwrap();
+                        if dosubmit {
+                            // submit the vote for this user, if we can
+                            // first check that it is a valid submission, and let them know if it is not
+                            let valid_submission;
+
+                            let mut subcount = 0;
+                            {
+                                let mut wvote = vote.write().unwrap();
+
+                                if let Some(uv) = wvote.uservotes.get_mut(&uid) {
+                                    valid_submission = uv.votes.are_valid(votetype, vals.len());
+
+                                    if valid_submission {
+                                        let ballot = uv.votes.get_ballot(vals.len());
+                                        if wvote.submittedvotes.insert(uid, ballot).is_none() {
+                                            subcount = wvote.submittedvotes.len();
+                                            isfirst = true;
+                                        }
+                                    }
+                                } else {
+                                    panic!("No user but got submit");
+                                }
                             }
 
+                            if !valid_submission {
+                                // return an error to the user
+                                let errresp = format!("\nError: invalid values for a {} vote, please fix your vote", votetype.to_string());
+                                user_vote_message!(interaction, uid, errresp, vote, ctx, num_pages, vals, false, vote_once);
+                            } else {
+                                // update the count
+                                if isfirst {
+                                    cid.edit_message(ctx, basemsg.id, |e| {
+                                        setup_base_message!(e, subcount, votetype.to_string(), pingstr)
+                                    }).await.unwrap();
+                                }
+                                showresults = true;
+
+                            }
+                        }
+
+                        if showresults {
                             // calculate the vote result
                             let resultsmsg;
                             {
@@ -701,7 +755,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
                                 })
                             }).await.unwrap();
                         } else {
-                            user_vote_message!(interaction, uid, "", vote, ctx, num_pages, vals, false);
+                            user_vote_message!(interaction, uid, "", vote, ctx, num_pages, vals, false, vote_once);
                         }
                     },
                 }
@@ -760,7 +814,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
                     }
 
                     // edit the ephemeral
-                    user_vote_message!(interaction, uid, errresp, vote, ctx, num_pages, vals, false);
+                    user_vote_message!(interaction, uid, errresp, vote, ctx, num_pages, vals, false, vote_once);
                 } else {
                     panic!("Modal response didn't have input text?");
                 }
@@ -772,9 +826,16 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
         };
     } // end select loop
 
-    // update the main message to indicate the vote is over, could display final results too, if we wanted?
+    // update the main message to indicate the vote is over, could display final results too, depending on settings
     cid.edit_message(ctx, basemsg.id, |e| {
-        e.content(format!("Vote Finished")).components(|c| c)
+        e.content(
+            if show_at_timeout {
+                let rvote = vote.read().unwrap();
+                rvote.get_results(&vals)
+            } else {
+                format!("Vote Finished")
+            }
+        ).components(|c| c)
     }).await.unwrap();
 
 }
@@ -963,10 +1024,15 @@ async fn handle_suggestion_phase(ctx: &Context, author: &User, cid: ChannelId, m
             }
             else => {
                 println!("Ending collection for sug msg! Timed out");
-                // update the dm to say so
+                // update the msg to say so
                 msg.edit(&ctx, |e| {
-                    e.content("Vote suggestion timed out").components(|c| c)
+                    e.content("Time Up! Starting Vote...").components(|c| c)
                 }).await.unwrap();
+
+                // Should we do vote here? Have an option for it?
+                if vi.vals.len() > 1 {
+                    do_vote = true;
+                }
                 break;
             }
         }
@@ -1020,6 +1086,36 @@ fn create_dm_vote_comp<'a, 'b>(mut c: &'a mut CreateComponents, vi: &'b VoteInfo
                 ))
         });
 
+        r = r.create_button(|b| {
+            b
+                .custom_id(ID_BUILD_SHOWRES_BTN)
+                .style(ButtonStyle::Secondary)
+                .label(format!("Show Results at Timeout = {}",
+                    if vi.show_at_timeout {
+                        "Yes"
+                    } else {
+                        "No"
+                    }
+                ))
+        });
+
+        r = r.create_button(|b| {
+            b
+                .custom_id(ID_BUILD_VOTEONE_BTN)
+                .style(ButtonStyle::Secondary)
+                .label(format!("Can Resubmit Vote = {}",
+                    if !vi.vote_once {
+                        "Yes"
+                    } else {
+                        "No"
+                    }
+                ))
+        });
+
+        r
+    });
+
+    c = c.create_action_row(|mut r| {
         // ping options
         r = r.create_button(|b| {
             b
@@ -1123,6 +1219,12 @@ async fn handle_dm_vote(ctx: Context, msg: Message) {
                     ID_BUILD_SUG_BTN => {
                         vi.take_sugs = !vi.take_sugs;
                     },
+                    ID_BUILD_SHOWRES_BTN => {
+                        vi.show_at_timeout = !vi.show_at_timeout;
+                    },
+                    ID_BUILD_VOTEONE_BTN => {
+                        vi.vote_once = !vi.vote_once;
+                    },
                     ID_BUILD_PING_BTN => {
                         vi.ping_chan += 1;
                         if vi.ping_chan >= 3 {
@@ -1190,7 +1292,7 @@ async fn handle_dm_vote(ctx: Context, msg: Message) {
                         println!("Creating vote with options: {:?}", vi);
 
                         let update_content: String = if vi.take_sugs {
-                            "Vote Created\nHit 'Start Vote' in the channel to end the suggestion phase. You can edit and remove other's suggestions from there as well with the 'Add Suggestion' button.".into()
+                            "Vote Created\nHit 'Start Vote' in the channel to end the suggestion phase early before the timeout.\nAs vote creator you can edit and remove other's suggestions from there as well with the 'Add Suggestion' button.".into()
                         } else {
                             "Vote Created".into()
                         };
