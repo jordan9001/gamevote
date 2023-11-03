@@ -494,7 +494,7 @@ macro_rules! user_vote_message {
 
 async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
     let pingstr = vi.get_ping();
-    let VoteInfo{kind: votetype, vals, timeout, show_at_timeout, vote_once, .. } = vi;
+    let VoteInfo{kind: votetype, mut vals, timeout, show_at_timeout, vote_once, .. } = vi;
 
     let vote = Arc::new(RwLock::new(Vote::new(votetype)));
     let num_pages = ((vals.len() -1) / PERPAGE) + 1;
@@ -503,6 +503,11 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
     let basemsg = cid.send_message(ctx, |m| {
         setup_base_message!(m, 0, votetype.to_string(), pingstr)
     }).await.unwrap();
+
+    // first let's keep each game name under 33 char
+    for v in &mut vals {
+        v.truncate(33)
+    }
 
     // send a ephemeral message (or multiple) to the channel for everyone, with the voting options
     // only 5 rows per message, so we have <> btns
@@ -756,10 +761,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
                         if !refresh_msg {
                             interaction.create_interaction_response(ctx, |resp| {
                                 resp.kind(InteractionResponseType::Modal).interaction_response_data(|d| {
-                                    let mut title = &format!("Vote for {}", vals[num])[..];
-                                    if title.len() > 42 {
-                                        title = &title[..42];
-                                    }
+                                    let title = format!("Vote for {}", vals[num]);
                                     d.custom_id(ID_VOTE_VAL_INPUT)
                                         .title(title)
                                         .components(|c| {
