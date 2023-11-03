@@ -756,8 +756,12 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
                         if !refresh_msg {
                             interaction.create_interaction_response(ctx, |resp| {
                                 resp.kind(InteractionResponseType::Modal).interaction_response_data(|d| {
+                                    let mut title = &format!("Vote for {}", vals[num])[..];
+                                    if title.len() > 42 {
+                                        title = &title[..42];
+                                    }
                                     d.custom_id(ID_VOTE_VAL_INPUT)
-                                        .title(format!("Vote for {}", vals[num]))
+                                        .title(title)
                                         .components(|c| {
                                             c.create_action_row(|r| {
                                                 // create text input for adding the options
