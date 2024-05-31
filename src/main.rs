@@ -26,10 +26,18 @@ use tallystick::{
     score::ScoreTally,
 };
 
+//TODO:
+// 1) test add prompt message
+// b> test indicate timeout period (just amount for now)
+// then: new ranked choice setup, where each choice is a button that cycles through available positions (and a reset button)
+
 const ID_BUILD_TYPE: &str = "VoteKind";
 const ID_BUILD_SUG_BTN: &str = "SugBtn";
 const ID_BUILD_SHOWRES_BTN: &str = "ShowResBtn";
 const ID_BUILD_VOTEONE_BTN: &str = "OneVoteBtn";
+const ID_BUILD_PROMPT_BTN: &str = "PromptBtn";
+const ID_BUILD_PROMPT_INPUT: &str = "BuildPromptModal";
+const ID_BUILD_PROMPT_INPUT_TXT: &str = "BuildPromptIn";
 const ID_BUILD_PING_BTN: &str = "PingBtn";
 const ID_BUILD_DUR_BTN: &str = "DurBtn";
 const ID_BUILD_CHOICE_BTN: &str = "ValBtn";
@@ -117,11 +125,12 @@ impl VoteType {
 #[derive(Debug)]
 struct VoteInfo {
     kind: VoteType,
+    prompt: String,
     take_sugs: bool,
     show_at_timeout: bool,
     vote_once: bool,
-    //TODO show_before_end: bool,
-    //TODO early_stop: bool,
+    show_timeout: bool, // TODO
+    allow_early_stop: bool, // TODO
     ping_chan: u8,
     timeout: Duration,
     vals: Vec<String>,
@@ -131,9 +140,12 @@ impl VoteInfo {
     fn new() -> Self {
         VoteInfo {
             kind: VOTE_APPROVAL,
+            prompt: "".into(),
             take_sugs: false,
             show_at_timeout: true,
             vote_once: false,
+            show_timeout: true,
+            allow_early_stop: true,
             ping_chan: 0,
             timeout: DEFAULT_TIMEOUT,
             vals: Vec::new(),
@@ -144,12 +156,14 @@ impl VoteInfo {
         self.vals.len() > 1 || self.take_sugs
     }
 
-    fn get_timeout_str(&self) -> String {
+    fn get_timeout_str(&self, suffix: &str) -> String {
         let fsec = self.timeout.as_secs_f64() / (60.0 * 60.0);
-        if fsec.fract() == 0.0 {
-            format!("{}", fsec)
+        if fsec == 0.0 {
+            "".into()
+        } else if fsec.fract() == 0.0 {
+            format!("{}{}", fsec, suffix)
         } else {
-            format!("{:.1}", fsec)
+            format!("{:.1}{}", fsec, suffix)
         }
     }
 
@@ -165,7 +179,8 @@ impl VoteInfo {
 
 enum CastVotes {
     Select(Vec<usize>), // one or more choices, used for normal or approval voting
-    Score(HashMap<usize, f32>), // choices associated with a value, also used for rank voting
+    Score(HashMap<usize, f32>), // choices associated with a value
+    Rank(HashMap<usize, usize>), // rank voting
 }
 
 impl CastVotes {
@@ -174,7 +189,7 @@ impl CastVotes {
             VOTE_APPROVAL => CastVotes::Select(Vec::new()),
             VOTE_SCORE => CastVotes::Score(HashMap::new()),
             VOTE_LSCORE => CastVotes::Score(HashMap::new()),
-            VOTE_BORDA => CastVotes::Score(HashMap::new()),
+            VOTE_BORDA => CastVotes::Rank(HashMap::new()),
             _ => panic!("Tried to create CastVotes with unknown vote type"),
         }
     }
@@ -186,14 +201,17 @@ impl CastVotes {
             CastVotes::Select(v) => {
                 v.to_vec()
             },
-            CastVotes::Score(m) => {
-                let mut vt: Vec<(usize, f32)> = Vec::new();
+            CastVotes::Score(_m) => {
+                panic!("Tried to get a ordered vec, but have a Score type");
+            },
+            CastVotes::Rank(m) => {
+                let mut vt: Vec<(usize, usize)> = Vec::new();
                 for (u, f) in m {
                     vt.push((*u,*f));
                 }
                 vt.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
                 vt.iter().map(|x| x.0).collect()
-            }
+            },
         }
     }
 
@@ -210,6 +228,9 @@ impl CastVotes {
                 }
                 v
             }
+            CastVotes::Rank(_) => {
+                panic!("Tried to get weighted vec but have a rank");
+            },
         }
     }
 
@@ -232,25 +253,21 @@ impl CastVotes {
                 abssum < 10.0001f32
             }
             VOTE_BORDA => {
-                // check every key is in there
-                // check each key has a non-zero rating
-                // not too worried about tie ratings, just let the sorting sort it
-                match self {
-                    CastVotes::Select(_) => {
-                        panic!("Borda vote with select backing");
-                    },
-                    CastVotes::Score(m) => {
-                        for i in 0..size {
-                            if let Some(v) = m.get(&i) {
-                                if *v < 1.0 {
-                                    return false;
-                                }
-                            } else {
+                // check each key has a non-zero rating (default is size-1)
+                // not too worried about the ratings, just let the sorting sort it
+                if let CastVotes::Rank(m) = self {
+                    for i in 0..size {
+                        if let Some(v) = m.get(&i) {
+                            if *v < 1 {
                                 return false;
                             }
-
+                        } else {
+                            return false;
                         }
-                    },
+
+                    }
+                } else {
+                    panic!("Tried to check validity of a BORDA with out a rank backing");
                 }
                 true
             },
@@ -274,6 +291,16 @@ impl CastVotes {
                 }
                 CastVotes::Score(newm)
             },
+            CastVotes::Rank(m) => {
+                let mut newm = m.clone();
+                // add in defaults
+                for i in 0..size {
+                    if !newm.contains_key(&i) {
+                        newm.insert(i, size-1);
+                    }
+                }
+                CastVotes::Rank(newm)
+            }
         }
     }
 }
@@ -359,10 +386,10 @@ impl Vote {
 // a macro because the builder for creating and editing have the same functions, but different types
 // maybe serenity should put those in a trait
 macro_rules! setup_base_message {
-    ($m:expr, $num_votes:expr, $vtype:expr, $ping:expr) => {
-        //TODO show timeout time
+    ($prompt:expr, $timestr:expr, $m:expr, $num_votes:expr, $vtype:expr, $ping:expr) => {
+        //TODO show timeout time nicer
         $m
-            .content(format!("{}{} Vote: {} Votes so far", $ping, $vtype, $num_votes))
+            .content(format!("{}{}{}{} Vote: {} Votes so far\n", $prompt, $ping, $timestr, $vtype, $num_votes))
             .components(|c| {
                 c.create_action_row(|r| {
                     r.create_button(|btn| {
@@ -394,6 +421,14 @@ fn create_user_message<'a, 'b, 'c>(mut c: &'b mut CreateComponents, vals: &'c Ve
                         0.0
                     };
                     format!(": {}", s)
+                },
+                CastVotes::Rank(m) => {
+                    let s = if let Some(score) = m.get(&vali) {
+                        *score
+                    } else {
+                        vals.len()
+                    };
+                    format!(": Rank {}", s)
                 }
             }
         } else {
@@ -494,6 +529,7 @@ macro_rules! user_vote_message {
 
 async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
     let pingstr = vi.get_ping();
+    let timestr = vi.get_timeout_str(" hr ");
     let VoteInfo{kind: votetype, mut vals, timeout, show_at_timeout, vote_once, .. } = vi;
 
     let vote = Arc::new(RwLock::new(Vote::new(votetype)));
@@ -501,7 +537,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
 
     // actually let's try just having a "vote" button, so we can edit the ephemeral button to match each user
     let basemsg = cid.send_message(ctx, |m| {
-        setup_base_message!(m, 0, votetype.to_string(), pingstr)
+        setup_base_message!(vi.prompt, timestr, m, 0, votetype.to_string(), pingstr)
     }).await.unwrap();
 
     // first let's keep each game name under 33 char
@@ -687,7 +723,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
                                 // update the count
                                 if isfirst {
                                     cid.edit_message(ctx, basemsg.id, |e| {
-                                        setup_base_message!(e, subcount, votetype.to_string(), pingstr)
+                                        setup_base_message!(vi.prompt, timestr, e, subcount, votetype.to_string(), pingstr)
                                     }).await.unwrap();
                                 }
                                 showresults = true;
@@ -724,7 +760,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
                         }
 
                         let num = value_id[ID_VOTE_VAL_PREFIX.len()..].parse::<usize>().unwrap();
-                        let mut current_score: f32 = 0.0;
+                        let mut current_score_f: f32 = 0.0;
                         let mut refresh_msg = true;
 
                         println!("Vote for value {} ({})", num, vals[num]);
@@ -746,11 +782,26 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
                                     CastVotes::Score(m) => {
                                         // show a modal to collect a float number from them
                                         if let Some(score) = m.get(&num) {
-                                            current_score = *score;
+                                            current_score_f = *score;
                                         }
                                         // we need to drop the lock before we await and create the modal
                                         // don't update the message yet, we will do that after the modal
                                         refresh_msg = false;
+                                    },
+                                    CastVotes::Rank(m) => {
+                                        // rank++
+                                        let rank = match m.get(&num) {
+                                            Some(score) => *score,
+                                            _ => vals.len(),
+                                        };
+
+                                        let mut rank = rank + 1;
+                                        if rank > vals.len() {
+                                            rank = 1;
+                                        }
+                                        
+                                        m.insert(num, rank);
+                                        // no modal, just refresh the message
                                     },
                                 }
                             } else {
@@ -771,7 +822,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
                                                     t.custom_id(format!("{}{}", ID_VOTE_VAL_INPUT_PREFIX, num))
                                                         .style(InputTextStyle::Short)
                                                         .label(votetype.value_name())
-                                                        .value(current_score.to_string())
+                                                        .value(current_score_f.to_string())
                                                         .min_length(1)
                                                         .max_length(5)
                                                         .required(true)
@@ -833,6 +884,9 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
                                 CastVotes::Score(m) => {
                                     m.insert(num, score);
                                 },
+                                CastVotes::Rank(_m) => {
+                                    panic!("Got modal response for a rank vote?");
+                                },
                             }
                         } else {
                             panic!("Somehow got a modal interaction without an entry in the vote map?")
@@ -846,6 +900,7 @@ async fn start_vote(ctx: &Context, cid: ChannelId, vi: VoteInfo) {
                 }
             }
             else => {
+                //TODO could be from a broken connection as well or something? Get out while you can
                 println!("Ending collection for vote! Timed out");
                 break;
             }
@@ -893,8 +948,8 @@ fn create_sug_comp<'a, 'b>(mut c: &'a mut CreateComponents) -> &'a mut CreateCom
 macro_rules! setup_sug_message {
     ($m:expr, $vi:expr) => {
         {
-            //TODO show timeout time
-            let mut sug_msg = format!("{}Submit suggestions for the vote!\nSuggestions so far:\n", $vi.get_ping());
+            //TODO show timeout time nicer when no timeout
+            let mut sug_msg = format!("{}{}Submit suggestions for the vote:\n{}\nSuggestions so far:\n", $vi.get_ping(), $vi.get_timeout_str(" hr "), $vi.prompt);
 
             for c in &$vi.vals {
                 sug_msg.push_str(&c);
@@ -1080,9 +1135,9 @@ async fn handle_suggestion_phase(ctx: &Context, author: &User, cid: ChannelId, m
 }
 
 fn create_dm_vote_comp<'a, 'b>(mut c: &'a mut CreateComponents, vi: &'b VoteInfo) -> &'a mut CreateComponents {
-    // vote type selection
-    c = c.create_action_row(|r| {
-        r.create_select_menu(|u| {
+    // vote type selection and prompt
+    c = c.create_action_row(|mut r| {
+        r = r.create_select_menu(|u| {
             u
                 .custom_id(ID_BUILD_TYPE)
                 .min_values(1)
@@ -1100,10 +1155,24 @@ fn create_dm_vote_comp<'a, 'b>(mut c: &'a mut CreateComponents, vi: &'b VoteInfo
                     }
                     o
                 })
-        })
+        });
+        r
     });
     // options
     c = c.create_action_row(|mut r| {
+        // Prompt
+        r = r.create_button(|b| {
+            b
+                .custom_id(ID_BUILD_PROMPT_BTN)
+                .style(ButtonStyle::Secondary)
+                .label(
+                    if vi.prompt.len() == 0 {
+                        "No Prompt"
+                    } else {
+                        "Prompt Set"
+                    }
+                )
+        });
         // suggestion phase
         r = r.create_button(|b| {
             b
@@ -1168,8 +1237,8 @@ fn create_dm_vote_comp<'a, 'b>(mut c: &'a mut CreateComponents, vi: &'b VoteInfo
             b
                 .custom_id(ID_BUILD_DUR_BTN)
                 .style(ButtonStyle::Secondary)
-                .label(format!("Vote Timeout = {} hr",
-                    vi.get_timeout_str()
+                .label(format!("Vote Timeout = {}",
+                    vi.get_timeout_str(" hr")
                 ))
         });
 
@@ -1261,6 +1330,33 @@ async fn handle_dm_vote(ctx: Context, msg: Message) {
                             vi.ping_chan = 0;
                         }
                     },
+                    ID_BUILD_PROMPT_BTN => {
+                        // send modal to get a different duration
+                        let current_prompt = vi.prompt.clone();
+                        interaction.create_interaction_response(&ctx, |resp| {
+                            resp.kind(InteractionResponseType::Modal).interaction_response_data(|d| {
+                                d
+                                    .custom_id(ID_BUILD_PROMPT_INPUT)
+                                    .title("Prompt")
+                                    .components(|c| {
+                                        c.create_action_row(|r| {
+                                            r.create_input_text(|t| {
+                                                t
+                                                    .custom_id(ID_BUILD_PROMPT_INPUT_TXT)
+                                                    .style(InputTextStyle::Short)
+                                                    .label("Vote Prompt Message")
+                                                    .min_length(0)
+                                                    .max_length(24)
+                                                    .required(true)
+                                                    .value(current_prompt)
+                                            })
+                                        })
+                                    })
+                            })
+                        }).await.unwrap();
+
+                        update_dm = false;
+                    },
                     ID_BUILD_DUR_BTN => {
                         // send modal to get a different duration
                         interaction.create_interaction_response(&ctx, |resp| {
@@ -1278,7 +1374,7 @@ async fn handle_dm_vote(ctx: Context, msg: Message) {
                                                     .min_length(1)
                                                     .max_length(6)
                                                     .required(true)
-                                                    .value(vi.get_timeout_str())
+                                                    .value(vi.get_timeout_str(""))
                                             })
                                         })
                                     })
@@ -1363,6 +1459,23 @@ async fn handle_dm_vote(ctx: Context, msg: Message) {
             },
             Some(interaction) = mod_col.next() => {
                 match &interaction.data.custom_id[..] {
+                    ID_BUILD_PROMPT_INPUT => {
+                        if let ActionRowComponent::InputText(it) = &interaction.data.components[0].components[0] {
+                            vi.prompt = it.value.clone();
+                            vi.prompt = content_safe(
+                                &ctx,
+                                vi.prompt,
+                                &ContentSafeOptions::default(),
+                                &[]
+                            );
+                            if (vi.prompt.len() > 0) && (!vi.prompt.ends_with('\n')) {
+                                vi.prompt.push('\n');
+                            }
+                            // sanitize anything else?
+                        } else {
+                            vi.prompt = "".into()
+                        }
+                    },
                     ID_BUILD_DUR_INPUT => {
                         if let ActionRowComponent::InputText(it) = &interaction.data.components[0].components[0] {
                             if let Ok(hrs) = it.value.parse::<f64>() {
