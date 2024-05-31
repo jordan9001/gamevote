@@ -253,7 +253,7 @@ impl CastVotes {
                 abssum < 10.0001f32
             }
             VOTE_BORDA => {
-                // check each key has a non-zero rating (default is size-1)
+                // check each included key has a non-zero rating (default is size)
                 // not too worried about the ratings, just let the sorting sort it
                 if let CastVotes::Rank(m) = self {
                     for i in 0..size {
@@ -261,8 +261,6 @@ impl CastVotes {
                             if *v < 1 {
                                 return false;
                             }
-                        } else {
-                            return false;
                         }
 
                     }
@@ -296,7 +294,7 @@ impl CastVotes {
                 // add in defaults
                 for i in 0..size {
                     if !newm.contains_key(&i) {
-                        newm.insert(i, size-1);
+                        newm.insert(i, size);
                     }
                 }
                 CastVotes::Rank(newm)
